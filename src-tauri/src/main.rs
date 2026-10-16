@@ -34,11 +34,20 @@ unsafe extern "system" fn ctrl_handler(ctrl_type: u32) -> BOOL {
 }
 
 fn main() {
+    let mut args = std::env::args_os();
+    if args.nth(1).as_deref() == Some(std::ffi::OsStr::new("--taskbar-watchdog")) {
+        if let (Some(pid), Some(marker)) = (args.next(), args.next()) {
+            if let Ok(pid) = pid.to_string_lossy().parse::<u32>() {
+                utils::run_taskbar_watchdog(pid, marker.into());
+            }
+        }
+        return;
+    }
+
     std::env::set_var(
         "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
         "--disable-background-networking --disable-component-update --disable-features=Translate,OptimizationHints,MediaRouter",
     );
-
     unsafe {
         let _ = SetConsoleCtrlHandler(Some(ctrl_handler), true);
     }

@@ -745,11 +745,24 @@ pub fn get_bloom_scale(_app: &tauri::AppHandle) -> f64 {
 pub fn get_setting_str(_app: &tauri::AppHandle, key: &str) -> Option<String> {
     let cache = crate::state::SETTINGS_CACHE.get()?;
     let guard = cache.lock().ok()?;
-    guard.get(key)?.as_str().map(|s| s.to_string())
+    let val = guard.get(key)?;
+    if let Some(s) = val.as_str() {
+        Some(s.to_string())
+    } else if let Some(b) = val.as_bool() {
+        Some(b.to_string())
+    } else if let Some(n) = val.as_i64() {
+        Some(n.to_string())
+    } else if let Some(f) = val.as_f64() {
+        Some(f.to_string())
+    } else {
+        None
+    }
 }
 
 fn dock_setting_enabled(value: Option<&serde_json::Value>) -> bool {
-    value.is_none_or(|value| value.as_str() == Some("true"))
+    value.is_none_or(|v| {
+        v.as_str() == Some("true") || v.as_bool() == Some(true)
+    })
 }
 
 /// An absent setting uses the fresh-install default; any explicit value other

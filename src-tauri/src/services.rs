@@ -26,6 +26,12 @@ static WIN_KEY_DOWN: AtomicBool = AtomicBool::new(false);
 /// Digit (1-9) of the currently held Win+Number combo, 0 when none. Key
 /// auto-repeat re-fires the keydown; only the first press may toggle an app.
 static WIN_NUMBER_HELD: AtomicU8 = AtomicU8::new(0);
+
+/// Physical Alt key state for 3D Alt+Tab window switcher
+pub static ALT_KEY_HELD: AtomicBool = AtomicBool::new(false);
+pub static ALT_TAB_ACTIVE: AtomicBool = AtomicBool::new(false);
+pub static WIN_TAB_ACTIVE: AtomicBool = AtomicBool::new(false);
+
 /// Virtual key Microsoft documents as "unassigned", used as the mask key.
 /// See `send_start_menu_mask`.
 const MASK_VK: u16 = 0xE8;
@@ -33,18 +39,15 @@ const MASK_VK: u16 = 0xE8;
 /// Raw handle of the installed keyboard hook, 0 while none is installed.
 static KEYBOARD_HOOK: AtomicIsize = AtomicIsize::new(0);
 
-/// Win+1-9 is the only feature that needs a global keyboard hook: Explorer
-/// already registers those hotkeys, so `RegisterHotKey` can't claim them.
-/// Volume and brightness keys are left to Windows, and Bloom's overlays follow
-/// the resulting changes instead. The hook only exists while Win+1-9 is in use
-/// (the dock replaces the taskbar and the setting is on); the rest of the time
-/// Bloom doesn't see the keyboard at all.
+/// Win+1-9 and 3D Alt+Tab need a global keyboard hook to intercept keystrokes
+/// before Windows shell claims them.
 pub fn setup_keyboard_hook(app_handle: AppHandle) {
     let _ = KEYBOARD_HOOK_APP_HANDLE.set(app_handle.clone());
     std::thread::spawn(move || {
         // Exiting removes the hook with the process; never touch it mid-shutdown.
         while !SHUTTING_DOWN.load(Ordering::Relaxed) {
-            let wanted = NATIVE_TASKBAR_HIDDEN.load(Ordering::Relaxed) && dock_win_number_enabled();
+            let wanted = (NATIVE_TASKBAR_HIDDEN.load(Ordering::Relaxed) && dock_win_number_enabled())
+                || alt_tab_3d_enabled();
             if wanted != (KEYBOARD_HOOK.load(Ordering::Relaxed) != 0) {
                 // A low-level hook runs on the thread that installed it, which
                 // needs a message loop, so install and remove it on the main thread.
@@ -90,6 +93,16 @@ fn dock_win_number_enabled() -> bool {
         .unwrap_or(true)
 }
 
+/// 3D Alt+Tab window switcher can be toggled in Settings > Overlays
+pub fn alt_tab_3d_enabled() -> bool {
+    let Some(app) = KEYBOARD_HOOK_APP_HANDLE.get() else {
+        return true;
+    };
+    crate::utils::get_setting_str(app, "bloom-alt-tab-3d-enabled")
+        .map(|v| v != "false")
+        .unwrap_or(true)
+}
+
 /// Whether one of Bloom's HUD overlays is enabled (`bloom-volume-overlay-enabled`,
 /// `bloom-brightness-overlay-enabled`). With an overlay off, the matching keys
 /// and the native flyout are left to Windows instead of being taken over.
@@ -114,7 +127,7 @@ fn win_key_physically_down() -> bool {
 /// Swallowing a Win+Number combo would look exactly like that on Win release,
 /// so a tap of an unassigned key is injected first — the same trick as
 /// AutoHotkey's `#MenuMaskKey` — making the shell treat Win as a real modifier.
-fn send_start_menu_mask() {
+pub fn send_start_menu_mask() {
     use windows::Win32::UI::Input::KeyboardAndMouse::{
         SendInput, INPUT, INPUT_0, KEYBDINPUT, KEYEVENTF_KEYUP, VIRTUAL_KEY,
     };
@@ -150,6 +163,18 @@ fn send_start_menu_mask() {
     }
 }
 
+/// Explicitly releases all Alt modifier states so Windows and other apps (games, editors) never get stuck with a pressed Alt key.
+pub fn release_alt_key() {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        keybd_event, KEYEVENTF_KEYUP, VK_LMENU, VK_MENU, VK_RMENU,
+    };
+    unsafe {
+        keybd_event(VK_LMENU.0 as u8, 0, KEYEVENTF_KEYUP, 0);
+        keybd_event(VK_RMENU.0 as u8, 0, KEYEVENTF_KEYUP, 0);
+        keybd_event(VK_MENU.0 as u8, 0, KEYEVENTF_KEYUP, 0);
+    }
+}
+
 /// Hands the slot to the dock window, whose click handler already knows how to
 /// focus a running window or launch a pinned app.
 fn emit_dock_win_number(index: u8) {
@@ -162,12 +187,59 @@ fn emit_dock_win_number(index: u8) {
     });
 }
 
+/// Finds and hides any native Windows Task Switcher dialogs (e.g. XamlExplorerHostIslandWindow, TaskSwitcherWnd)
+pub fn dismiss_native_task_switcher() {
+    unsafe {
+        use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
+        use windows::Win32::UI::WindowsAndMessaging::{
+            EnumWindows, FindWindowA, GetClassNameA, IsWindowVisible, PostMessageA, ShowWindow,
+            SW_HIDE, WM_CANCELMODE,
+        };
+
+        for cls in &[
+            c"XamlExplorerHostIslandWindow",
+            c"TaskSwitcherWnd",
+            c"MultitaskingViewFrame",
+        ] {
+            if let Ok(hwnd) = FindWindowA(windows::core::PCSTR(cls.as_ptr() as *const u8), windows::core::PCSTR::null()) {
+                if !hwnd.0.is_null() {
+                    let _ = ShowWindow(hwnd, SW_HIDE);
+                    let _ = PostMessageA(Some(hwnd), WM_CANCELMODE, WPARAM(0), LPARAM(0));
+                }
+            }
+        }
+
+        unsafe extern "system" fn enum_proc(hwnd: HWND, _: LPARAM) -> windows::core::BOOL {
+            if IsWindowVisible(hwnd).as_bool() {
+                let mut buf = [0u8; 128];
+                let len = GetClassNameA(hwnd, &mut buf);
+                if len > 0 {
+                    if let Ok(cls) = std::str::from_utf8(&buf[..len as usize]) {
+                        if cls == "XamlExplorerHostIslandWindow"
+                            || cls == "TaskSwitcherWnd"
+                            || cls == "MultitaskingViewFrame"
+                        {
+                            let _ = ShowWindow(hwnd, SW_HIDE);
+                            let _ = PostMessageA(Some(hwnd), WM_CANCELMODE, WPARAM(0), LPARAM(0));
+                        }
+                    }
+                }
+            }
+            windows::core::BOOL(1)
+        }
+        let _ = EnumWindows(Some(enum_proc), LPARAM(0));
+    }
+}
+
 unsafe extern "system" fn keyboard_hook_proc(
     code: i32,
     wparam: windows::Win32::Foundation::WPARAM,
     lparam: windows::Win32::Foundation::LPARAM,
 ) -> windows::Win32::Foundation::LRESULT {
-    use windows::Win32::UI::Input::KeyboardAndMouse::{VIRTUAL_KEY, VK_LWIN, VK_RWIN};
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        GetAsyncKeyState, VIRTUAL_KEY, VK_ESCAPE, VK_LEFT, VK_LMENU, VK_MENU, VK_RETURN,
+        VK_RIGHT, VK_RMENU, VK_SHIFT, VK_TAB, VK_LWIN, VK_RWIN,
+    };
     use windows::Win32::UI::WindowsAndMessaging::{
         KBDLLHOOKSTRUCT, LLKHF_INJECTED, WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
     };
@@ -177,9 +249,220 @@ unsafe extern "system" fn keyboard_hook_proc(
         let is_down = wparam.0 == WM_KEYDOWN as usize || wparam.0 == WM_SYSKEYDOWN as usize;
         let is_up = wparam.0 == WM_KEYUP as usize || wparam.0 == WM_SYSKEYUP as usize;
 
-        // Only physical presses drive the Win+Number replacement; injected
-        // events (our own Start taps and mask key) must not re-enter it.
+        // Only physical presses drive keyboard combos; injected events must not re-enter
         if (kb.flags.0 & LLKHF_INJECTED.0) == 0 {
+            let is_alt = vk_code == VK_MENU || vk_code == VK_LMENU || vk_code == VK_RMENU;
+            let alt_phys_down = unsafe {
+                use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_MENU, VK_LMENU, VK_RMENU};
+                (GetAsyncKeyState(VK_MENU.0 as i32) as u16 & 0x8000) != 0
+                    || (GetAsyncKeyState(VK_LMENU.0 as i32) as u16 & 0x8000) != 0
+                    || (GetAsyncKeyState(VK_RMENU.0 as i32) as u16 & 0x8000) != 0
+            };
+            let alt_down = (kb.flags.0 & 0x20) != 0 || ALT_KEY_HELD.load(Ordering::Relaxed) || alt_phys_down;
+
+            let win_down = WIN_KEY_DOWN.load(Ordering::Relaxed) || win_key_physically_down();
+
+            // Track physical Alt key state
+            if is_alt {
+                if is_down {
+                    ALT_KEY_HELD.store(true, Ordering::Relaxed);
+                } else if is_up {
+                    ALT_KEY_HELD.store(false, Ordering::Relaxed);
+                    if ALT_TAB_ACTIVE.swap(false, Ordering::Relaxed) {
+                        dismiss_native_task_switcher();
+                        send_start_menu_mask();
+                        release_alt_key();
+                        if let Some(app) = KEYBOARD_HOOK_APP_HANDLE.get().cloned() {
+                            tauri::async_runtime::spawn(async move {
+                                let _ = app.emit_to("overlay", "alt-tab-commit", ());
+                            });
+                        }
+                        // NEVER swallow Alt keyup! Let Windows clear GetKeyState(VK_MENU)
+                    }
+                }
+            }
+
+            let is_tab = vk_code == VK_TAB;
+            let is_alt_tab_active = ALT_TAB_ACTIVE.load(Ordering::Relaxed);
+            let is_win_tab_active = WIN_TAB_ACTIVE.load(Ordering::Relaxed);
+
+            // Intercept Win + Tab for persistent 3D Task View
+            if is_tab && win_down && alt_tab_3d_enabled() {
+                if is_down {
+                    send_start_menu_mask();
+                    dismiss_native_task_switcher();
+                    if is_win_tab_active {
+                        // Pressing Win+Tab again closes Task View
+                        WIN_TAB_ACTIVE.store(false, Ordering::Relaxed);
+                        ALT_TAB_ACTIVE.store(false, Ordering::Relaxed);
+                        dismiss_native_task_switcher();
+                        release_alt_key();
+                        if let Some(app) = KEYBOARD_HOOK_APP_HANDLE.get().cloned() {
+                            tauri::async_runtime::spawn(async move {
+                                let _ = app.emit_to("overlay", "alt-tab-cancel", ());
+                            });
+                        }
+                    } else {
+                        // Open persistent 3D Task View
+                        WIN_TAB_ACTIVE.store(true, Ordering::Relaxed);
+                        ALT_TAB_ACTIVE.store(false, Ordering::Relaxed);
+                        tauri::async_runtime::spawn(async move {
+                            while WIN_TAB_ACTIVE.load(Ordering::Relaxed) {
+                                dismiss_native_task_switcher();
+                                tokio::time::sleep(tokio::time::Duration::from_millis(30)).await;
+                            }
+                            dismiss_native_task_switcher();
+                        });
+                        if let Some(app) = KEYBOARD_HOOK_APP_HANDLE.get().cloned() {
+                            tauri::async_runtime::spawn(async move {
+                                if let Some(win) = app.get_webview_window("overlay") {
+                                    crate::services::sync_overlays(&app);
+                                    let _ = win.set_ignore_cursor_events(false);
+                                    let _ = win.show();
+                                    if let Ok(hwnd) = win.hwnd() {
+                                        crate::utils::re_assert_topmost(hwnd);
+                                    }
+                                }
+                                let _ = app.emit_to("overlay", "win-tab-open", ());
+                            });
+                        }
+                    }
+                    return windows::Win32::Foundation::LRESULT(1);
+                } else if is_up {
+                    dismiss_native_task_switcher();
+                    return windows::Win32::Foundation::LRESULT(1);
+                }
+            }
+
+            // Intercept Alt + Tab for 3D Switcher
+            if is_tab && (alt_down || is_alt_tab_active) && !win_down && alt_tab_3d_enabled() {
+                if is_down {
+                    let is_shift = unsafe {
+                        (GetAsyncKeyState(VK_SHIFT.0 as i32) as u16 & 0x8000) != 0
+                    };
+                    let dir: i32 = if is_shift { -1 } else { 1 };
+
+                    if !is_alt_tab_active {
+                        ALT_TAB_ACTIVE.store(true, Ordering::Relaxed);
+                        WIN_TAB_ACTIVE.store(false, Ordering::Relaxed);
+                        dismiss_native_task_switcher();
+                        // Continually suppress native Windows Alt+Tab while Bloom's switcher is active
+                        tauri::async_runtime::spawn(async move {
+                            while ALT_TAB_ACTIVE.load(Ordering::Relaxed) {
+                                dismiss_native_task_switcher();
+                                tokio::time::sleep(tokio::time::Duration::from_millis(30)).await;
+                            }
+                            dismiss_native_task_switcher();
+                        });
+                        if let Some(app) = KEYBOARD_HOOK_APP_HANDLE.get().cloned() {
+                            tauri::async_runtime::spawn(async move {
+                                if let Some(win) = app.get_webview_window("overlay") {
+                                    crate::services::sync_overlays(&app);
+                                    let _ = win.set_ignore_cursor_events(false);
+                                    let _ = win.show();
+                                    if let Ok(hwnd) = win.hwnd() {
+                                        crate::utils::re_assert_topmost(hwnd);
+                                    }
+                                }
+                                let _ = app.emit_to("overlay", "alt-tab-open", dir);
+                            });
+                        }
+                    } else {
+                        // Already active: Step to next window without sending Windows keys
+                        dismiss_native_task_switcher();
+                        if let Some(app) = KEYBOARD_HOOK_APP_HANDLE.get().cloned() {
+                            tauri::async_runtime::spawn(async move {
+                                if let Some(win) = app.get_webview_window("overlay") {
+                                    if let Ok(hwnd) = win.hwnd() {
+                                        crate::utils::re_assert_topmost(hwnd);
+                                    }
+                                }
+                                let _ = app.emit_to("overlay", "alt-tab-step", dir);
+                            });
+                        }
+                    }
+                    return windows::Win32::Foundation::LRESULT(1);
+                } else if is_up {
+                    dismiss_native_task_switcher();
+                    return windows::Win32::Foundation::LRESULT(1);
+                }
+            }
+
+            // In Win+Tab persistent mode, Tab advances through windows
+            if is_tab && is_win_tab_active {
+                if is_down {
+                    let is_shift = unsafe {
+                        (GetAsyncKeyState(VK_SHIFT.0 as i32) as u16 & 0x8000) != 0
+                    };
+                    let dir: i32 = if is_shift { -1 } else { 1 };
+                    dismiss_native_task_switcher();
+                    if let Some(app) = KEYBOARD_HOOK_APP_HANDLE.get().cloned() {
+                        tauri::async_runtime::spawn(async move {
+                            if let Some(win) = app.get_webview_window("overlay") {
+                                if let Ok(hwnd) = win.hwnd() {
+                                    crate::utils::re_assert_topmost(hwnd);
+                                }
+                            }
+                            let _ = app.emit_to("overlay", "alt-tab-step", dir);
+                        });
+                    }
+                }
+                return windows::Win32::Foundation::LRESULT(1);
+            }
+
+            // Intercept keys while 3D Alt+Tab or Win+Tab is active
+            if is_alt_tab_active || is_win_tab_active {
+                if vk_code == VK_ESCAPE {
+                    if is_down {
+                        ALT_TAB_ACTIVE.store(false, Ordering::Relaxed);
+                        WIN_TAB_ACTIVE.store(false, Ordering::Relaxed);
+                        dismiss_native_task_switcher();
+                        send_start_menu_mask();
+                        release_alt_key();
+                        if let Some(app) = KEYBOARD_HOOK_APP_HANDLE.get().cloned() {
+                            tauri::async_runtime::spawn(async move {
+                                let _ = app.emit_to("overlay", "alt-tab-cancel", ());
+                            });
+                        }
+                    }
+                    return windows::Win32::Foundation::LRESULT(1);
+                } else if vk_code == VK_LEFT {
+                    if is_down {
+                        dismiss_native_task_switcher();
+                        if let Some(app) = KEYBOARD_HOOK_APP_HANDLE.get().cloned() {
+                            tauri::async_runtime::spawn(async move {
+                                let _ = app.emit_to("overlay", "alt-tab-step", -1);
+                            });
+                        }
+                    }
+                    return windows::Win32::Foundation::LRESULT(1);
+                } else if vk_code == VK_RIGHT {
+                    if is_down {
+                        dismiss_native_task_switcher();
+                        if let Some(app) = KEYBOARD_HOOK_APP_HANDLE.get().cloned() {
+                            tauri::async_runtime::spawn(async move {
+                                let _ = app.emit_to("overlay", "alt-tab-step", 1);
+                            });
+                        }
+                    }
+                    return windows::Win32::Foundation::LRESULT(1);
+                } else if vk_code == VK_RETURN {
+                    if is_down {
+                        ALT_TAB_ACTIVE.store(false, Ordering::Relaxed);
+                        WIN_TAB_ACTIVE.store(false, Ordering::Relaxed);
+                        dismiss_native_task_switcher();
+                        send_start_menu_mask();
+                        release_alt_key();
+                        if let Some(app) = KEYBOARD_HOOK_APP_HANDLE.get().cloned() {
+                            tauri::async_runtime::spawn(async move {
+                                let _ = app.emit_to("overlay", "alt-tab-commit", ());
+                            });
+                        }
+                    }
+                    return windows::Win32::Foundation::LRESULT(1);
+                }
+            }
+
             if vk_code == VK_LWIN || vk_code == VK_RWIN {
                 if is_down {
                     WIN_KEY_DOWN.store(true, Ordering::Relaxed);
@@ -189,6 +472,9 @@ unsafe extern "system" fn keyboard_hook_proc(
                 } else if is_up {
                     WIN_KEY_DOWN.store(false, Ordering::Relaxed);
                     WIN_NUMBER_HELD.store(0, Ordering::Relaxed);
+                    if WIN_TAB_ACTIVE.load(Ordering::Relaxed) {
+                        send_start_menu_mask();
+                    }
                 }
             } else if WIN_KEY_DOWN.load(Ordering::Relaxed) {
                 if let Some(index) = win_number_index(vk_code.0) {
@@ -754,6 +1040,7 @@ pub fn setup_audio_visualization(app_handle: AppHandle) {
                                 }
                                 let _ = capture_client.ReleaseBuffer(num_frames);
                             }
+                            std::thread::sleep(std::time::Duration::from_millis(200));
                             continue;
                         }
 
@@ -1344,7 +1631,8 @@ pub fn setup_system_worker(app_handle: AppHandle) -> Sender<SystemCommand> {
                     }
                 }
                 use windows::Win32::Graphics::Gdi::{
-                    GetMonitorInfoA, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+                    GetMonitorInfoA, MonitorFromPoint, MonitorFromWindow, MONITORINFO,
+                    MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTOPRIMARY,
                 };
                 let mut hwnd = GetForegroundWindow();
 
@@ -1465,83 +1753,149 @@ pub fn setup_system_worker(app_handle: AppHandle) -> Sender<SystemCommand> {
                                 };
 
                                 if GetMonitorInfoA(h_monitor, &mut mi).as_bool() {
-                                    let screen_rect = mi.rcMonitor;
-                                    let is_maximized =
-                                        IsZoomed(hwnd).as_bool() || (style & WS_MAXIMIZE.0) != 0;
-                                    let is_maximized_standard =
-                                        is_maximized && (style & WS_CAPTION.0) != 0;
-
-                                    let mut is_client_fullscreen = false;
-                                    let mut client_rect = RECT::default();
-                                    if GetClientRect(hwnd, &mut client_rect).is_ok() {
-                                        let mut top_left = POINT {
-                                            x: client_rect.left,
-                                            y: client_rect.top,
-                                        };
-                                        let mut bottom_right = POINT {
-                                            x: client_rect.right,
-                                            y: client_rect.bottom,
-                                        };
-                                        let _ = ClientToScreen(hwnd, &mut top_left);
-                                        let _ = ClientToScreen(hwnd, &mut bottom_right);
-
-                                        is_client_fullscreen = top_left.x <= screen_rect.left
-                                            && top_left.y <= screen_rect.top
-                                            && bottom_right.x >= screen_rect.right
-                                            && bottom_right.y >= screen_rect.bottom;
-                                    }
-
-                                    let is_matches_screen = rect.left <= screen_rect.left
-                                        && rect.top <= screen_rect.top
-                                        && rect.right >= screen_rect.right
-                                        && rect.bottom >= screen_rect.bottom;
-
-                                    // Truly fullscreen means client covers screen, OR window matches screen but is not just a standard maximized window
-                                    current_is_fs = (is_client_fullscreen || is_matches_screen)
-                                        && !is_maximized_standard;
-
-                                    if current_is_fs || is_maximized {
-                                        should_overlap = true;
-                                        should_notch_overlap = true;
-                                        // Standard maximized windows leave the dock's
-                                        // reserved strip empty on both sides, so the dock
-                                        // can stretch to a full taskbar. True fullscreen
-                                        // windows cover the screen and should not.
-                                        should_maximized = is_maximized && !current_is_fs;
+                                    let primary_hmon = MonitorFromPoint(
+                                        windows::Win32::Foundation::POINT { x: 0, y: 0 },
+                                        MONITOR_DEFAULTTOPRIMARY,
+                                    );
+                                    let mut primary_mi = MONITORINFO {
+                                        cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+                                        ..Default::default()
+                                    };
+                                    let primary_screen_rect = if GetMonitorInfoA(primary_hmon, &mut primary_mi).as_bool() {
+                                        primary_mi.rcMonitor
                                     } else {
-                                        should_overlap = false;
-                                        if let Ok(dock_rect_lock) = DOCK_RECT.lock() {
-                                            if let Some(dr) = *dock_rect_lock {
-                                                let scale = cached_scale;
-                                                let d_left = (dr.x as f64 * scale) as i32;
-                                                let d_right =
-                                                    d_left + (dr.width as f64 * scale) as i32;
-                                                let res_h = (56.0 * scale) as i32;
-                                                let trigger_y = screen_rect.bottom - res_h;
+                                        RECT { left: 0, top: 0, right: 1920, bottom: 1080 }
+                                    };
 
-                                                if rect.left < d_right - 4
-                                                    && rect.right > d_left + 4
-                                                    && rect.bottom > trigger_y + 4
-                                                {
-                                                    should_overlap = true;
+                                    let is_on_primary_monitor = (mi.dwFlags & 1) != 0 || h_monitor == primary_hmon;
+
+                                    if !is_on_primary_monitor {
+                                        // The active window is on a secondary monitor.
+                                        // It is NOT fullscreen or maximized on Bloom's primary monitor!
+                                        current_is_fs = false;
+                                        should_maximized = false;
+                                        should_overlap = false;
+                                        should_notch_overlap = false;
+
+                                        // Only a non-maximized floating window can physically extend into the primary monitor
+                                        let is_maximized_secondary =
+                                            IsZoomed(hwnd).as_bool() || (style & WS_MAXIMIZE.0) != 0;
+                                        if !is_maximized_secondary {
+                                            if let Ok(dock_rect_lock) = DOCK_RECT.lock() {
+                                                if let Some(dr) = *dock_rect_lock {
+                                                    let scale = cached_scale;
+                                                    let d_left = primary_screen_rect.left + (dr.x as f64 * scale) as i32;
+                                                    let d_right = d_left + (dr.width as f64 * scale) as i32;
+                                                    let res_h = (56.0 * scale) as i32;
+                                                    let trigger_y = primary_screen_rect.bottom - res_h;
+
+                                                    if rect.left < d_right - 4
+                                                        && rect.right > d_left + 4
+                                                        && rect.bottom > trigger_y + 4
+                                                        && rect.top < primary_screen_rect.bottom
+                                                    {
+                                                        should_overlap = true;
+                                                    }
+                                                }
+                                            }
+
+                                            if let Ok(notch_rect_lock) = NOTCH_RECT.lock() {
+                                                if let Some(nr) = *notch_rect_lock {
+                                                    let scale = cached_scale;
+                                                    let n_left = primary_screen_rect.left + (nr.x as f64 * scale) as i32;
+                                                    let n_right = n_left + (nr.width as f64 * scale) as i32;
+                                                    let res_h = (36.0 * scale) as i32;
+                                                    let trigger_y = primary_screen_rect.top + res_h;
+
+                                                    if rect.left < n_right - 4
+                                                        && rect.right > n_left + 4
+                                                        && rect.top < trigger_y - 4
+                                                        && rect.bottom > primary_screen_rect.top
+                                                    {
+                                                        should_notch_overlap = true;
+                                                    }
                                                 }
                                             }
                                         }
+                                    } else {
+                                        let screen_rect = primary_screen_rect;
+                                        let is_maximized =
+                                            IsZoomed(hwnd).as_bool() || (style & WS_MAXIMIZE.0) != 0;
+                                        let is_maximized_standard =
+                                            is_maximized && (style & WS_CAPTION.0) != 0;
 
-                                        if let Ok(notch_rect_lock) = NOTCH_RECT.lock() {
-                                            if let Some(nr) = *notch_rect_lock {
-                                                let scale = cached_scale;
-                                                let n_left = (nr.x as f64 * scale) as i32;
-                                                let n_right =
-                                                    n_left + (nr.width as f64 * scale) as i32;
-                                                let res_h = (36.0 * scale) as i32;
-                                                let trigger_y = screen_rect.top + res_h;
+                                        let mut is_client_fullscreen = false;
+                                        let mut client_rect = RECT::default();
+                                        if GetClientRect(hwnd, &mut client_rect).is_ok() {
+                                            let mut top_left = POINT {
+                                                x: client_rect.left,
+                                                y: client_rect.top,
+                                            };
+                                            let mut bottom_right = POINT {
+                                                x: client_rect.right,
+                                                y: client_rect.bottom,
+                                            };
+                                            let _ = ClientToScreen(hwnd, &mut top_left);
+                                            let _ = ClientToScreen(hwnd, &mut bottom_right);
 
-                                                if rect.left < n_right - 4
-                                                    && rect.right > n_left + 4
-                                                    && rect.top < trigger_y - 4
-                                                {
-                                                    should_notch_overlap = true;
+                                            is_client_fullscreen = top_left.x <= screen_rect.left
+                                                && top_left.y <= screen_rect.top
+                                                && bottom_right.x >= screen_rect.right
+                                                && bottom_right.y >= screen_rect.bottom;
+                                        }
+
+                                        let is_matches_screen = rect.left <= screen_rect.left
+                                            && rect.top <= screen_rect.top
+                                            && rect.right >= screen_rect.right
+                                            && rect.bottom >= screen_rect.bottom;
+
+                                        // Truly fullscreen means client covers screen, OR window matches screen but is not just a standard maximized window
+                                        current_is_fs = (is_client_fullscreen || is_matches_screen)
+                                            && !is_maximized_standard;
+
+                                        if current_is_fs || is_maximized {
+                                            should_overlap = true;
+                                            should_notch_overlap = true;
+                                            // Standard maximized windows leave the dock's
+                                            // reserved strip empty on both sides, so the dock
+                                            // can stretch to a full taskbar. True fullscreen
+                                            // windows cover the screen and should not.
+                                            should_maximized = is_maximized && !current_is_fs;
+                                        } else {
+                                            should_overlap = false;
+                                            if let Ok(dock_rect_lock) = DOCK_RECT.lock() {
+                                                if let Some(dr) = *dock_rect_lock {
+                                                    let scale = cached_scale;
+                                                    let d_left = screen_rect.left + (dr.x as f64 * scale) as i32;
+                                                    let d_right =
+                                                        d_left + (dr.width as f64 * scale) as i32;
+                                                    let res_h = (56.0 * scale) as i32;
+                                                    let trigger_y = screen_rect.bottom - res_h;
+
+                                                    if rect.left < d_right - 4
+                                                        && rect.right > d_left + 4
+                                                        && rect.bottom > trigger_y + 4
+                                                    {
+                                                        should_overlap = true;
+                                                    }
+                                                }
+                                            }
+
+                                            if let Ok(notch_rect_lock) = NOTCH_RECT.lock() {
+                                                if let Some(nr) = *notch_rect_lock {
+                                                    let scale = cached_scale;
+                                                    let n_left = screen_rect.left + (nr.x as f64 * scale) as i32;
+                                                    let n_right =
+                                                        n_left + (nr.width as f64 * scale) as i32;
+                                                    let res_h = (36.0 * scale) as i32;
+                                                    let trigger_y = screen_rect.top + res_h;
+
+                                                    if rect.left < n_right - 4
+                                                        && rect.right > n_left + 4
+                                                        && rect.top < trigger_y - 4
+                                                    {
+                                                        should_notch_overlap = true;
+                                                    }
                                                 }
                                             }
                                         }
@@ -2912,7 +3266,11 @@ unsafe extern "system" fn mouse_hook_proc(
                         false
                     };
 
-                    let should_ignore = !(over_left || over_right);
+                    let should_ignore = if ALT_TAB_ACTIVE.load(Ordering::Relaxed) || WIN_TAB_ACTIVE.load(Ordering::Relaxed) {
+                        false
+                    } else {
+                        !(over_left || over_right)
+                    };
                     let prev = MH_LAST_OV_IGNORE.load(Ordering::Relaxed);
                     let new_val = if should_ignore { 1 } else { 0 };
                     if prev != new_val {
@@ -4056,6 +4414,21 @@ fn recover_from_webview_failure(handle: &AppHandle) {
             crate::commands::restore_taskbar_and_exit(&handle);
         } else {
             crate::commands::restart_bloom(handle).await;
+        }
+    });
+}
+
+pub fn setup_memory_trim_worker() {
+    std::thread::spawn(|| {
+        loop {
+            std::thread::sleep(Duration::from_secs(60));
+            if SHUTTING_DOWN.load(Ordering::Relaxed) {
+                break;
+            }
+            unsafe {
+                use windows::Win32::System::Threading::{GetCurrentProcess, SetProcessWorkingSetSize};
+                let _ = SetProcessWorkingSetSize(GetCurrentProcess(), usize::MAX, usize::MAX);
+            }
         }
     });
 }

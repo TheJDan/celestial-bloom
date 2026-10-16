@@ -31,6 +31,9 @@ import { EdgeSurface } from "./components/EdgeSurface";
 import { ShelfTypeIcon } from "./components/ShelfTypeIcon";
 import { WifiPanel } from "./components/WifiPanel";
 import { BluetoothPanel } from "./components/BluetoothPanel";
+import { AudioOutputPanel } from "./components/AudioOutputPanel";
+import { SystemTrayPanel } from "./components/SystemTrayPanel";
+import { JarvisPanel } from "./components/JarvisPanel";
 import {
 	Cpu,
 	MemoryStick,
@@ -46,7 +49,8 @@ import {
 	ChevronLeft,
 	ChevronRight,
 	Inbox,
-	Music
+	Music,
+	Bot
 } from "lucide-react";
 
 /**
@@ -430,7 +434,18 @@ type BloomMode =
 	| "status"
 	| "shelf"
 	| "wifi"
-	| "bluetooth";
+	| "bluetooth"
+	| "system-tray"
+	| "audio-output"
+	| "jarvis";
+
+interface JarvisStatus {
+	online: boolean;
+	state: string;
+	muted: boolean;
+	last_command: string;
+	last_response: string;
+}
 
 // The shelf is a short-lived stash: one row, newest first, oldest evicted.
 const SHELF_MAX_ITEMS = 10;
@@ -500,7 +515,7 @@ function App() {
 	isOpenRef.current = isOpen;
 	const [isReady, setIsReady] = useState(false);
 	const [scale, setScale] = useState(() =>
-		parseFloat(localStorage.getItem("bloom-scale") || "1.0")
+		parseFloat(localStorage.getItem("bloom-notch-scale") || localStorage.getItem("bloom-scale") || "1.0")
 	);
 	const [timeFormat24h, setTimeFormat24h] = useState(
 		() => localStorage.getItem("bloom-time-format-24h") === "true"
@@ -524,6 +539,41 @@ function App() {
 		setEventPeek(true);
 		if (eventPeekTimeoutRef.current) clearTimeout(eventPeekTimeoutRef.current);
 		eventPeekTimeoutRef.current = setTimeout(() => setEventPeek(false), duration);
+	}, []);
+
+	// Live JARVIS / Coucou status
+	const [jarvisStatus, setJarvisStatus] = useState<JarvisStatus | null>(null);
+	const [jarvisActive, setJarvisActive] = useState(false);
+
+	useEffect(() => {
+		let cancelled = false;
+		const checkJarvis = async () => {
+			try {
+				const st = await invoke<JarvisStatus>("get_jarvis_status");
+				if (cancelled) return;
+				setJarvisStatus(st);
+				const isActive =
+					st.online &&
+					st.state !== "OFFLINE" &&
+					(st.state === "LISTENING" ||
+						st.state === "THINKING" ||
+						st.state === "SPEAKING" ||
+						Boolean(st.last_command));
+				setJarvisActive(isActive);
+			} catch {
+				if (!cancelled) {
+					setJarvisStatus(null);
+					setJarvisActive(false);
+				}
+			}
+		};
+
+		checkJarvis();
+		const timer = setInterval(checkJarvis, 1500);
+		return () => {
+			cancelled = true;
+			clearInterval(timer);
+		};
 	}, []);
 
 	const [notchMode, setNotchMode] = useState(() => {
@@ -819,7 +869,7 @@ function App() {
 				started = true;
 				interval = proceedWithStartup();
 				unlistenSplash.then((fn) => fn());
-			}, 6000);
+			}, 1500);
 			return () => {
 				clearTimeout(safetyTimer);
 				if (interval) clearInterval(interval);
@@ -1012,7 +1062,7 @@ function App() {
 							dockStarted = true;
 							runDockInit();
 							unlistenDock.then((fn) => fn());
-						}, 6000);
+						}, 1500);
 					};
 
 					const storedVersion = localStorage.getItem("bloom-app-version");
@@ -1031,7 +1081,7 @@ function App() {
 					}
 				}
 
-				const scaleVal = getVal("bloom-scale");
+				const scaleVal = getVal("bloom-notch-scale") ?? getVal("bloom-scale");
 				if (scaleVal !== null) setScale(parseFloat(scaleVal));
 
 				const widgetsVal = getVal("bloom-status-widgets");
@@ -1100,7 +1150,10 @@ function App() {
 			"bloom-media-compact-glow-enabled": setSettingsCompactGlowEnabled,
 			"bloom-media-layout": setMediaLayout,
 			"bloom-corners-enabled": setSettingsCornersEnabled,
-			"bloom-scale": setScale,
+			"bloom-notch-scale": setScale,
+			"bloom-scale": (v: number) => {
+				if (!localStorage.getItem("bloom-notch-scale")) setScale(v);
+			},
 			"bloom-low-battery-threshold": setLowBatteryThreshold,
 			"bloom-dock-enabled": setDockEnabled,
 			"bloom-dock-mode": setDockMode,
@@ -1422,7 +1475,10 @@ function App() {
 			prev === "status" ||
 			prev === "shelf" ||
 			prev === "wifi" ||
-			prev === "bluetooth"
+			prev === "bluetooth" ||
+			prev === "system-tray" ||
+			prev === "audio-output" ||
+			prev === "jarvis"
 				? restingModeRef.current
 				: prev
 		);
@@ -1888,6 +1944,8 @@ function App() {
 	const showMusicBubble = musicActivity && timerActive && !isOpen && isVisible && !isHidden;
 	const showShelfBubble =
 		shelfItems.length > 0 && !isOpen && isVisible && !isHidden && bloomMode !== "announcement";
+	const showJarvisBubble =
+		jarvisActive && !isOpen && isVisible && !isHidden && bloomMode !== "announcement";
 	restingModeRef.current = collapsedMode;
 	bloomModeRef.current = bloomMode;
 
@@ -2332,16 +2390,6 @@ function App() {
 		[sendBrightness]
 	);
 
-	// Open system tray (unhide taskbar and invoke Win+B)
-	const openSystemTray = useCallback(async (e: React.MouseEvent) => {
-		e.stopPropagation();
-		try {
-			await invoke("open_system_tray");
-		} catch (e) {
-			console.error("Failed to open system tray:", e);
-		}
-	}, []);
-
 	const openSettingsWindow = useCallback(async () => {
 		try {
 			await invoke("open_settings_window");
@@ -2497,7 +2545,8 @@ function App() {
 		if (isCalendarMode) return 480;
 		if (bloomMode === "shelf") return 380;
 		if (bloomMode === "command-center" && isOpen) return 350;
-		if (bloomMode === "wifi" || bloomMode === "bluetooth") return 350;
+		if (bloomMode === "wifi" || bloomMode === "bluetooth" || bloomMode === "system-tray" || bloomMode === "audio-output") return 360;
+		if (bloomMode === "jarvis") return 380;
 		if (showMusicOnStatusHover) {
 			return 170 + (settingsVisualizerEnabled ? 30 : 0);
 		}
@@ -2536,6 +2585,9 @@ function App() {
 		}
 		if (bloomMode === "command-center") return isOpen ? 230 : 36;
 		if (bloomMode === "wifi" || bloomMode === "bluetooth") return 300;
+		if (bloomMode === "system-tray") return 340;
+		if (bloomMode === "audio-output") return 280;
+		if (bloomMode === "jarvis") return 340;
 		if (bloomMode === "status") return 36;
 		if (isMusicMode && isOpen) {
 			const hasProgressBar = (mediaInfo.duration_ms ?? 0) > 0;
@@ -2738,6 +2790,7 @@ function App() {
 															})
 														);
 													}}
+													onAudioOutputClick={() => setBloomMode("audio-output")}
 												/>
 											) : (
 												<div className="compact-premium-layout">
@@ -2804,7 +2857,7 @@ function App() {
 																	className="classic-audio-output-btn"
 																	onClick={(e) => {
 																		e.stopPropagation();
-																		invoke("open_sound_settings").catch(() => {});
+																		setBloomMode("audio-output");
 																	}}
 																	whileTap={{ scale: 0.9 }}
 																	title="Audio Output"
@@ -3259,6 +3312,51 @@ function App() {
 									)}
 								</AnimatePresence>
 
+								{/* System Tray Flyout */}
+								<AnimatePresence>
+									{bloomMode === "system-tray" && (
+										<motion.div
+											key="system-tray-view"
+											initial={{ opacity: 0 }}
+											animate={{ opacity: 1 }}
+											exit={{ opacity: 0, filter: "blur(4px)", transition: { duration: 0.1 } }}
+											transition={{ type: "spring", stiffness: 400, damping: 30 }}
+										>
+											<SystemTrayPanel onBack={() => setBloomMode("command-center")} />
+										</motion.div>
+									)}
+								</AnimatePresence>
+
+								{/* Audio Output Switcher Flyout */}
+								<AnimatePresence>
+									{bloomMode === "audio-output" && (
+										<motion.div
+											key="audio-output-view"
+											initial={{ opacity: 0 }}
+											animate={{ opacity: 1 }}
+											exit={{ opacity: 0, filter: "blur(4px)", transition: { duration: 0.1 } }}
+											transition={{ type: "spring", stiffness: 400, damping: 30 }}
+										>
+											<AudioOutputPanel onBack={() => setBloomMode("command-center")} />
+										</motion.div>
+									)}
+								</AnimatePresence>
+
+								{/* JARVIS / Coucou Panel */}
+								<AnimatePresence>
+									{bloomMode === "jarvis" && (
+										<motion.div
+											key="jarvis-view"
+											initial={{ opacity: 0 }}
+											animate={{ opacity: 1 }}
+											exit={{ opacity: 0, filter: "blur(4px)", transition: { duration: 0.1 } }}
+											transition={{ type: "spring", stiffness: 400, damping: 30 }}
+										>
+											<JarvisPanel onBack={() => setBloomMode(openingPanel())} />
+										</motion.div>
+									)}
+								</AnimatePresence>
+
 								{/* Command Center Panel */}
 								<AnimatePresence>
 									{bloomMode === "command-center" && (
@@ -3417,7 +3515,7 @@ function App() {
 													className="cc-circular-btn"
 													onClick={(e) => {
 														e.stopPropagation();
-														openSystemTray(e);
+														setBloomMode("system-tray");
 													}}
 													title="System Tray"
 												>
@@ -3459,8 +3557,16 @@ function App() {
 											<div className="cc-classic-sliders-area">
 												{/* Volume Slider */}
 												<div className="cc-classic-slider-row">
-													<div className="cc-classic-slider-label">
-														<VolumeLowIcon style={{ opacity: 0.5 }} />
+													<div
+														className="cc-classic-slider-label"
+														style={{ cursor: "pointer" }}
+														onClick={(e) => {
+															e.stopPropagation();
+															setBloomMode("audio-output");
+														}}
+														title="Seleccionar salida de audio"
+													>
+														<VolumeLowIcon style={{ opacity: 0.7 }} />
 														<span>Volume</span>
 													</div>
 													<div className="cc-classic-slider-track">
@@ -3480,6 +3586,17 @@ function App() {
 															style={{ width: `${displayVolume * 100}%` }}
 														/>
 													</div>
+													<button
+														className="cc-circular-btn"
+														style={{ width: 22, height: 22, padding: 0, minWidth: 22, border: "none" }}
+														onClick={(e) => {
+															e.stopPropagation();
+															setBloomMode("audio-output");
+														}}
+														title="Dispositivos de salida de audio"
+													>
+														<HeadphonesIcon size={12} style={{ opacity: 0.75 }} />
+													</button>
 													<span className="cc-classic-percentage">
 														{Math.round(displayVolume * 100)}%
 													</span>
@@ -3853,6 +3970,66 @@ function App() {
 							) : (
 								<Music size={14} strokeWidth={2.2} />
 							)}
+						</motion.button>
+					)}
+				</AnimatePresence>
+				{/* JARVIS activity in its own bubble when active/executing */}
+				<AnimatePresence onExitComplete={() => reportNotchRect.current()}>
+					{showJarvisBubble && (
+						<motion.button
+							key="jarvis-bubble"
+							type="button"
+							className={`activity-bubble ${isHovered ? "expanded" : ""}`}
+							aria-label="Open JARVIS"
+							style={{
+								left: "50%",
+								background:
+									jarvisStatus?.state === "LISTENING"
+										? "rgba(34, 197, 94, 0.2)"
+										: jarvisStatus?.state === "THINKING"
+										? "rgba(168, 85, 247, 0.2)"
+										: "rgba(56, 189, 248, 0.2)"
+							}}
+							initial={{
+								opacity: 0,
+								scale: 0.4,
+								x: -28,
+								marginLeft: getDynamicWidth() / 2 + (showMusicBubble ? 48 : 8)
+							}}
+							animate={{
+								opacity: 1,
+								scale: 1,
+								x: 0,
+								marginLeft: getDynamicWidth() / 2 + (showMusicBubble ? 48 : 8)
+							}}
+							exit={{ opacity: 0, scale: 0.4, x: -28 }}
+							transition={{
+								type: "spring",
+								stiffness: 400,
+								damping: 31,
+								opacity: { duration: 0.15 }
+							}}
+							onAnimationComplete={() => reportNotchRect.current()}
+							onClick={(e) => {
+								e.stopPropagation();
+								setIsHovered(true);
+								setBloomMode("jarvis");
+								setIsOpen(true);
+							}}
+							title={`JARVIS: ${jarvisStatus?.state || "Activo"} - Clic para abrir`}
+						>
+							<Bot
+								size={14}
+								style={{
+									color: jarvisStatus?.muted
+										? "#ef4444"
+										: jarvisStatus?.state === "LISTENING"
+										? "#22c55e"
+										: jarvisStatus?.state === "THINKING"
+										? "#c084fc"
+										: "#38bdf8"
+								}}
+							/>
 						</motion.button>
 					)}
 				</AnimatePresence>

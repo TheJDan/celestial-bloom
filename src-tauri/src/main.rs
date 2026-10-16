@@ -34,6 +34,11 @@ unsafe extern "system" fn ctrl_handler(ctrl_type: u32) -> BOOL {
 }
 
 fn main() {
+    std::env::set_var(
+        "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
+        "--disable-background-networking --disable-component-update --disable-features=Translate,OptimizationHints,MediaRouter",
+    );
+
     unsafe {
         let _ = SetConsoleCtrlHandler(Some(ctrl_handler), true);
     }
@@ -102,6 +107,11 @@ fn main() {
             open_settings_window,
             open_wifi_settings,
             open_sound_settings,
+            get_audio_output_devices,
+            set_default_audio_device,
+            get_jarvis_status,
+            jarvis_toggle_mute,
+            jarvis_send_prompt,
             open_notification_center,
             open_system_tray,
             set_ignore_cursor_events,
@@ -110,6 +120,11 @@ fn main() {
             hide_overlay,
             set_splash_fullscreen,
             sync_overlay_position,
+            get_alt_tab_windows,
+            switch_to_window,
+            cancel_alt_tab,
+            show_3d_switcher,
+            hide_3d_switcher,
             media_play_pause,
             media_next,
             media_previous,
@@ -344,6 +359,34 @@ fn main() {
             setup_settings_watcher(app.handle().clone());
             wifi::setup_wifi_notifications(app.handle().clone());
             bluetooth::setup_bluetooth_notifications(app.handle().clone());
+            services::setup_memory_trim_worker();
+
+            // Ensure main (notch) and dock windows are initialized and visible
+            // promptly even if frontend splash or event handshakes are delayed.
+            {
+                let ah = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    let dock_mode = get_setting_str(&ah, "bloom-dock-mode").unwrap_or_else(|| "smart".to_string());
+                    let notch_mode = get_setting_str(&ah, "bloom-notch-mode").unwrap_or_else(|| "smart".to_string());
+                    let _ = init_dock(ah.clone(), dock_mode).await;
+                    let _ = change_notch_mode(ah.clone(), notch_mode).await;
+                    if let Some(main_win) = ah.get_webview_window("main") {
+                        let _ = main_win.show();
+                        if let Ok(hwnd) = main_win.hwnd() {
+                            re_assert_topmost(hwnd);
+                        }
+                    }
+                    if dock_enabled() {
+                        if let Some(dock_win) = ah.get_webview_window("dock") {
+                            let _ = dock_win.show();
+                            if let Ok(hwnd) = dock_win.hwnd() {
+                                re_assert_topmost(hwnd);
+                            }
+                        }
+                    }
+                });
+            }
 
             // Listen for second-instance signal to open settings
             if let Some(&h_event) = SINGLE_INSTANCE_EVENT_HANDLE.get() {

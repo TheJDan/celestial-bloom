@@ -16,6 +16,10 @@ interface AppearanceTabProps {
 	toggleCorners: () => void;
 	scale: number;
 	handleScaleChange: (val: number) => void;
+	dockScale?: number;
+	handleDockScaleChange?: (val: number) => void;
+	notchScale?: number;
+	handleNotchScaleChange?: (val: number) => void;
 }
 
 export function AppearanceTab({
@@ -32,7 +36,11 @@ export function AppearanceTab({
 	cornersEnabled,
 	toggleCorners,
 	scale,
-	handleScaleChange
+	handleScaleChange,
+	dockScale,
+	handleDockScaleChange,
+	notchScale,
+	handleNotchScaleChange
 }: AppearanceTabProps) {
 	const showCustomColor = themeMode === "custom";
 	const showAdvancedSliders = themeMode === "custom" || themeMode === "adaptive";
@@ -138,25 +146,68 @@ export function AppearanceTab({
 
 				<SettingRow
 					icon={Maximize2}
-					label="UI & Font Scale"
-					desc={`Adjust desktop size (${Math.round(scale * 100)}%)`}
+					label="Dock Scale (Taskbar)"
+					desc={`Adjust taskbar size independently (${Math.round((dockScale ?? scale) * 100)}%)`}
+					divider={true}
+				>
+					<div className="scale-button-container">
+						<button
+							onClick={() => {
+								const current = dockScale ?? scale;
+								const next = Math.max(0.6, parseFloat((current - 0.1).toFixed(1)));
+								(handleDockScaleChange ?? handleScaleChange)(next);
+							}}
+							disabled={(dockScale ?? scale) <= 0.6}
+							className="scale-adjust-btn"
+							title="Make Dock Smaller"
+						>
+							—
+						</button>
+						<span className="scale-display-value">{Math.round((dockScale ?? scale) * 100)}%</span>
+						<button
+							onClick={() => {
+								const current = dockScale ?? scale;
+								const next = Math.min(1.3, parseFloat((current + 0.1).toFixed(1)));
+								(handleDockScaleChange ?? handleScaleChange)(next);
+							}}
+							disabled={(dockScale ?? scale) >= 1.3}
+							className="scale-adjust-btn"
+							title="Make Dock Larger"
+						>
+							+
+						</button>
+					</div>
+				</SettingRow>
+
+				<SettingRow
+					icon={Maximize2}
+					label="Notch Scale (Island)"
+					desc={`Adjust top floating notch size independently (${Math.round((notchScale ?? scale) * 100)}%)`}
 					divider={false}
 				>
 					<div className="scale-button-container">
 						<button
-							onClick={() => handleScaleChange(Math.max(0.8, parseFloat((scale - 0.1).toFixed(1))))}
-							disabled={scale <= 0.8}
+							onClick={() => {
+								const current = notchScale ?? scale;
+								const next = Math.max(0.8, parseFloat((current - 0.1).toFixed(1)));
+								(handleNotchScaleChange ?? handleScaleChange)(next);
+							}}
+							disabled={(notchScale ?? scale) <= 0.8}
 							className="scale-adjust-btn"
-							title="Decrease Scale"
+							title="Make Notch Smaller"
 						>
 							—
 						</button>
-						<span className="scale-display-value">{Math.round(scale * 100)}%</span>
+						<span className="scale-display-value">{Math.round((notchScale ?? scale) * 100)}%</span>
 						<button
-							onClick={() => handleScaleChange(Math.min(1.3, parseFloat((scale + 0.1).toFixed(1))))}
-							disabled={scale >= 1.3}
+							onClick={() => {
+								const current = notchScale ?? scale;
+								const next = Math.min(1.5, parseFloat((current + 0.1).toFixed(1)));
+								(handleNotchScaleChange ?? handleScaleChange)(next);
+							}}
+							disabled={(notchScale ?? scale) >= 1.5}
 							className="scale-adjust-btn"
-							title="Increase Scale"
+							title="Make Notch Larger"
 						>
 							+
 						</button>

@@ -151,6 +151,10 @@ function SettingsApp() {
 							toggleCorners={settings.toggleCorners}
 							scale={settings.scale}
 							handleScaleChange={settings.handleScaleChange}
+							dockScale={settings.dockScale}
+							handleDockScaleChange={settings.handleDockScaleChange}
+							notchScale={settings.notchScale}
+							handleNotchScaleChange={settings.handleNotchScaleChange}
 						/>
 					)}
 					{activeTab === "notch" && (
@@ -237,6 +241,8 @@ function SettingsApp() {
 							toggleBrightnessOverlay={settings.toggleBrightnessOverlay}
 							brightnessEdgeEnabled={settings.brightnessEdgeEnabled}
 							toggleBrightnessEdge={settings.toggleBrightnessEdge}
+							altTab3dEnabled={settings.altTab3dEnabled}
+							toggleAltTab3d={settings.toggleAltTab3d}
 						/>
 					)}
 					{activeTab === "about" && (

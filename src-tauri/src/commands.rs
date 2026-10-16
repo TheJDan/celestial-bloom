@@ -4058,3 +4058,404 @@ pub async fn activate_tray_icon(tray_id: String) -> Result<(), String> {
         .await
         .map_err(|e| e.to_string())?
 }
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct AudioOutputDevice {
+    pub id: String,
+    pub name: String,
+    pub is_default: bool,
+}
+
+#[tauri::command]
+pub async fn get_audio_output_devices() -> Result<Vec<AudioOutputDevice>, String> {
+    tauri::async_runtime::spawn_blocking(|| unsafe {
+        use windows::Win32::System::Com::{
+            CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_MULTITHREADED,
+            STGM_READ, CoTaskMemFree,
+        };
+        use windows::Win32::Media::Audio::{
+            eConsole, eRender, IMMDeviceEnumerator, MMDeviceEnumerator, DEVICE_STATE_ACTIVE,
+        };
+        use windows::Win32::Devices::FunctionDiscovery::PKEY_Device_FriendlyName;
+
+        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+
+        let enumerator: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)
+            .map_err(|e| format!("Failed to create MMDeviceEnumerator: {:?}", e))?;
+
+        let mut default_id_str = String::new();
+        if let Ok(default_dev) = enumerator.GetDefaultAudioEndpoint(eRender, eConsole) {
+            if let Ok(id) = default_dev.GetId() {
+                default_id_str = windows::core::PCWSTR::from_raw(id.0)
+                    .to_string()
+                    .unwrap_or_default();
+                CoTaskMemFree(Some(id.0 as *const _));
+            }
+        }
+
+        let collection = enumerator
+            .EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE)
+            .map_err(|e| format!("Failed to enum audio endpoints: {:?}", e))?;
+
+        let count = collection.GetCount().unwrap_or(0);
+        let mut devices = Vec::with_capacity(count as usize);
+
+        for i in 0..count {
+            let Ok(device) = collection.Item(i) else { continue; };
+            let Ok(id_raw) = device.GetId() else { continue; };
+            let id_str = windows::core::PCWSTR::from_raw(id_raw.0)
+                .to_string()
+                .unwrap_or_default();
+            CoTaskMemFree(Some(id_raw.0 as *const _));
+
+            let mut friendly_name = String::new();
+            if let Ok(store) = device.OpenPropertyStore(STGM_READ) {
+                if let Ok(prop) = store.GetValue(&PKEY_Device_FriendlyName) {
+                    let ptr = prop.Anonymous.Anonymous.Anonymous.pwszVal.0;
+                    if !ptr.is_null() {
+                        friendly_name = windows::core::PCWSTR::from_raw(ptr)
+                            .to_string()
+                            .unwrap_or_default();
+                    }
+                }
+            }
+            if friendly_name.is_empty() {
+                friendly_name = "Audio Device".to_string();
+            }
+
+            let is_default = !default_id_str.is_empty() && default_id_str == id_str;
+            devices.push(AudioOutputDevice {
+                id: id_str,
+                name: friendly_name,
+                is_default,
+            });
+        }
+
+        CoUninitialize();
+        Ok(devices)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn set_default_audio_device(device_id: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || unsafe {
+        use windows::Win32::System::Com::{
+            CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_MULTITHREADED,
+        };
+        use windows::Win32::Media::Audio::{eCommunications, eConsole, eMultimedia};
+        use com_policy_config::{IPolicyConfig, PolicyConfigClient};
+        use windows::core::HSTRING;
+
+        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+
+        let hstr = HSTRING::from(&device_id);
+        let pcwstr = windows::core::PCWSTR(hstr.as_ptr());
+
+        let policy_config: IPolicyConfig = CoCreateInstance(&PolicyConfigClient, None, CLSCTX_ALL)
+            .map_err(|e| format!("Failed to create PolicyConfigClient: {:?}", e))?;
+
+        let _ = policy_config.SetDefaultEndpoint(pcwstr, eConsole);
+        let _ = policy_config.SetDefaultEndpoint(pcwstr, eMultimedia);
+        let _ = policy_config.SetDefaultEndpoint(pcwstr, eCommunications);
+
+        CoUninitialize();
+        Ok(())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct JarvisStatus {
+    pub online: bool,
+    pub state: String,
+    pub muted: bool,
+    pub last_command: String,
+    pub last_response: String,
+}
+
+fn http_request_jarvis(method: &str, path: &str, body: Option<&str>) -> Result<String, String> {
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+    use std::time::Duration;
+
+    let mut stream = TcpStream::connect_timeout(
+        &"127.0.0.1:8765".parse().unwrap(),
+        Duration::from_millis(500),
+    )
+    .map_err(|e| e.to_string())?;
+
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(3)));
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
+
+    let request = match body {
+        Some(b) => format!(
+            "{} {} HTTP/1.1\r\nHost: 127.0.0.1:8765\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            method,
+            path,
+            b.len(),
+            b
+        ),
+        None => format!(
+            "{} {} HTTP/1.1\r\nHost: 127.0.0.1:8765\r\nConnection: close\r\n\r\n",
+            method, path
+        ),
+    };
+
+    stream.write_all(request.as_bytes()).map_err(|e| e.to_string())?;
+    let mut response = Vec::new();
+    let _ = stream.read_to_end(&mut response);
+
+    let response_str = String::from_utf8_lossy(&response);
+    if let Some(pos) = response_str.find("\r\n\r\n") {
+        Ok(response_str[pos + 4..].to_string())
+    } else {
+        Ok(response_str.to_string())
+    }
+}
+
+#[tauri::command]
+pub async fn get_jarvis_status() -> JarvisStatus {
+    tauri::async_runtime::spawn_blocking(|| {
+        if let Ok(body) = http_request_jarvis("GET", "/api/status", None) {
+            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&body) {
+                return JarvisStatus {
+                    online: val.get("online").and_then(|v| v.as_bool()).unwrap_or(true),
+                    state: val.get("state").and_then(|v| v.as_str()).unwrap_or("OFFLINE").to_string(),
+                    muted: val.get("muted").and_then(|v| v.as_bool()).unwrap_or(false),
+                    last_command: val.get("last_command").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                    last_response: val.get("last_response").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                };
+            }
+        }
+        JarvisStatus {
+            online: false,
+            state: "OFFLINE".to_string(),
+            muted: false,
+            last_command: String::new(),
+            last_response: String::new(),
+        }
+    })
+    .await
+    .unwrap_or(JarvisStatus {
+        online: false,
+        state: "OFFLINE".to_string(),
+        muted: false,
+        last_command: String::new(),
+        last_response: String::new(),
+    })
+}
+
+#[tauri::command]
+pub async fn jarvis_toggle_mute() -> Result<bool, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let body = http_request_jarvis("POST", "/api/toggle_mute", Some("{}"))?;
+        if let Ok(val) = serde_json::from_str::<serde_json::Value>(&body) {
+            Ok(val.get("muted").and_then(|v| v.as_bool()).unwrap_or(false))
+        } else {
+            Ok(false)
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn jarvis_send_prompt(text: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let payload = serde_json::json!({ "command": text, "text": text }).to_string();
+        let body = http_request_jarvis("POST", "/api/send", Some(&payload))?;
+        if let Ok(val) = serde_json::from_str::<serde_json::Value>(&body) {
+            let resp = val.get("response")
+                .or_else(|| val.get("text"))
+                .or_else(|| val.get("reply"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("Comando enviado.");
+            Ok(resp.to_string())
+        } else {
+            Ok("Comando enviado.".to_string())
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+// ── 3D Alt+Tab Window Switcher ────────────────────────────────────────────────
+
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
+pub struct AltTabItem {
+    pub hwnd: isize,
+    pub title: String,
+    pub app_name: String,
+    pub path: String,
+    pub icon: Option<String>,
+    pub thumbnail: Option<String>,
+    pub is_minimized: bool,
+}
+
+#[tauri::command]
+pub async fn get_alt_tab_windows(app: AppHandle) -> Vec<AltTabItem> {
+    let _ = &app;
+    tauri::async_runtime::spawn_blocking(move || {
+        use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_MULTITHREADED};
+        use windows::Win32::UI::WindowsAndMessaging::{GetWindowTextW, IsIconic};
+        use windows::Win32::Foundation::HWND;
+
+        let com_initialized = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED).is_ok() };
+
+        let mut raw_apps: Vec<AppInfo> = Vec::new();
+        unsafe {
+            let _ = EnumWindows(
+                Some(enum_windows_proc),
+                LPARAM(&mut raw_apps as *mut Vec<AppInfo> as isize),
+            );
+        }
+
+        let mut items = Vec::new();
+        for app_info in raw_apps {
+            let Some(hwnd_raw) = app_info.hwnd else { continue };
+            let hwnd = HWND(hwnd_raw as *mut _);
+
+            let mut text = [0u16; 512];
+            let len = unsafe { GetWindowTextW(hwnd, &mut text) };
+            let title = if len > 0 {
+                String::from_utf16_lossy(&text[..len as usize])
+            } else {
+                app_info.name.clone()
+            };
+
+            // Filter out system shell/bloom windows
+            if title == "Bloom" || title == "Bloom Dock" || title == "Overlay" {
+                continue;
+            }
+
+            let is_minimized = unsafe { IsIconic(hwnd).as_bool() };
+
+            let cache_key = get_cache_key(&app_info.path, Some(&app_info.name));
+            let icon = ICON_CACHE.get().and_then(|c| {
+                c.lock().ok().and_then(|m| m.get(&cache_key).cloned())
+            });
+
+            let thumbnail = crate::state::THUMBNAIL_CACHE.get().and_then(|c| {
+                c.lock().ok().and_then(|m| m.get(&hwnd_raw).map(|(img, _)| img.clone()))
+            }).or_else(|| {
+                if !is_minimized {
+                    crate::utils::capture_hwnd_to_base64(hwnd, 520, 320)
+                } else {
+                    None
+                }
+            });
+
+            items.push(AltTabItem {
+                hwnd: hwnd_raw,
+                title,
+                app_name: app_info.name,
+                path: app_info.path,
+                icon,
+                thumbnail,
+                is_minimized,
+            });
+        }
+
+        if com_initialized {
+            unsafe { CoUninitialize() };
+        }
+
+        items
+    })
+    .await
+    .unwrap_or_default()
+}
+
+#[tauri::command]
+pub async fn switch_to_window(hwnd: isize) -> Result<(), String> {
+    crate::services::ALT_TAB_ACTIVE.store(false, Ordering::Relaxed);
+    crate::services::WIN_TAB_ACTIVE.store(false, Ordering::Relaxed);
+    crate::services::dismiss_native_task_switcher();
+    crate::services::release_alt_key();
+    crate::services::send_start_menu_mask();
+
+    tauri::async_runtime::spawn_blocking(move || unsafe {
+        use windows::Win32::Foundation::HWND;
+        use windows::Win32::UI::WindowsAndMessaging::{
+            BringWindowToTop, GetForegroundWindow,
+            GetWindowThreadProcessId, IsIconic, SetForegroundWindow, ShowWindow,
+            SW_RESTORE, SW_SHOW,
+        };
+        use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
+
+        let target_hwnd = HWND(hwnd as *mut _);
+        if target_hwnd.0.is_null() {
+            return Err("Invalid HWND".to_string());
+        }
+
+        let fg_hwnd = GetForegroundWindow();
+        let cur_thread_id = GetCurrentThreadId();
+        let fg_thread_id = GetWindowThreadProcessId(fg_hwnd, None);
+        let target_thread_id = GetWindowThreadProcessId(target_hwnd, None);
+
+        if fg_thread_id != cur_thread_id {
+            let _ = AttachThreadInput(cur_thread_id, fg_thread_id, true);
+        }
+        if target_thread_id != cur_thread_id && target_thread_id != fg_thread_id {
+            let _ = AttachThreadInput(cur_thread_id, target_thread_id, true);
+        }
+
+        if IsIconic(target_hwnd).as_bool() {
+            let _ = ShowWindow(target_hwnd, SW_RESTORE);
+        } else {
+            let _ = ShowWindow(target_hwnd, SW_SHOW);
+        }
+
+        let _ = BringWindowToTop(target_hwnd);
+        let _ = SetForegroundWindow(target_hwnd);
+
+        if fg_thread_id != cur_thread_id {
+            let _ = AttachThreadInput(cur_thread_id, fg_thread_id, false);
+        }
+        if target_thread_id != cur_thread_id && target_thread_id != fg_thread_id {
+            let _ = AttachThreadInput(cur_thread_id, target_thread_id, false);
+        }
+
+        // Final safety release of Alt modifier so the switched app gets clean input
+        crate::services::release_alt_key();
+
+        Ok(())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub fn cancel_alt_tab() {
+    crate::services::ALT_TAB_ACTIVE.store(false, Ordering::Relaxed);
+    crate::services::WIN_TAB_ACTIVE.store(false, Ordering::Relaxed);
+    crate::services::dismiss_native_task_switcher();
+    crate::services::release_alt_key();
+    crate::services::send_start_menu_mask();
+}
+
+#[tauri::command]
+pub async fn show_3d_switcher(app: AppHandle) -> Result<(), String> {
+    if let Some(win) = app.get_webview_window("overlay") {
+        crate::services::sync_overlays(&app);
+        let _ = win.set_ignore_cursor_events(false);
+        let _ = win.show();
+        let _ = win.set_focus();
+        if let Ok(hwnd) = win.hwnd() {
+            crate::utils::re_assert_topmost(hwnd);
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn hide_3d_switcher(app: AppHandle) -> Result<(), String> {
+    if let Some(win) = app.get_webview_window("overlay") {
+        let _ = win.set_ignore_cursor_events(true);
+    }
+    Ok(())
+}
+

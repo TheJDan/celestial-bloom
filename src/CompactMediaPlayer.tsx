@@ -43,6 +43,7 @@ interface CompactMediaPlayerProps {
 	onAnimatePrev: () => void;
 	onAnimateNext: () => void;
 	onLayoutChange: (layout: "classic" | "compact") => void;
+	onAudioOutputClick?: () => void;
 }
 
 const MARQUEE_SPEED = 30;
@@ -125,7 +126,8 @@ export function CompactMediaPlayer({
 	nextBack,
 	onAnimatePrev,
 	onAnimateNext,
-	onLayoutChange
+	onLayoutChange,
+	onAudioOutputClick
 }: CompactMediaPlayerProps) {
 	const seekRef = useRef<HTMLInputElement>(null);
 
@@ -339,7 +341,11 @@ export function CompactMediaPlayer({
 					className="cmp-btn cmp-btn-side"
 					onClick={(e) => {
 						e.stopPropagation();
-						invoke("open_sound_settings").catch(() => {});
+						if (onAudioOutputClick) {
+							onAudioOutputClick();
+						} else {
+							invoke("open_sound_settings").catch(() => {});
+						}
 					}}
 					whileTap={{ scale: 0.9 }}
 					title="Audio Output"

@@ -1,4 +1,4 @@
-import { Volume2, Sun, ArrowLeftToLine, ArrowRightToLine } from "lucide-react";
+import { Volume2, Sun, ArrowLeftToLine, ArrowRightToLine, Layers } from "lucide-react";
 import { SettingRow } from "./SettingRow";
 
 interface OverlaysTabProps {
@@ -10,6 +10,8 @@ interface OverlaysTabProps {
 	toggleBrightnessOverlay: () => void;
 	brightnessEdgeEnabled: boolean;
 	toggleBrightnessEdge: () => void;
+	altTab3dEnabled: boolean;
+	toggleAltTab3d: () => void;
 }
 
 export function OverlaysTab({
@@ -20,7 +22,9 @@ export function OverlaysTab({
 	brightnessOverlayEnabled,
 	toggleBrightnessOverlay,
 	brightnessEdgeEnabled,
-	toggleBrightnessEdge
+	toggleBrightnessEdge,
+	altTab3dEnabled,
+	toggleAltTab3d
 }: OverlaysTabProps) {
 	return (
 		<>
@@ -74,6 +78,25 @@ export function OverlaysTab({
 						</label>
 					</SettingRow>
 				)}
+			</div>
+
+			<div className="setting-group-label">Window Switcher</div>
+			<div className="setting-group">
+				<SettingRow
+					icon={Layers}
+					label="3D Alt+Tab (Flip3D / Coverflow)"
+					desc="Linux/Compiz style 3D carousel window switcher with live previews and reflections"
+					divider={false}
+				>
+					<label className="toggle-switch">
+						<input
+							type="checkbox"
+							checked={altTab3dEnabled}
+							onChange={toggleAltTab3d}
+						/>
+						<span className="slider"></span>
+					</label>
+				</SettingRow>
 			</div>
 		</>
 	);

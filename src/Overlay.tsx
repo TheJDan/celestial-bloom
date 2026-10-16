@@ -12,6 +12,7 @@ import { MixerIcon, SpeakerIcon } from "./icons";
 import "./Overlay.css";
 import { EdgeSurface } from "./components/EdgeSurface";
 import { initTheme } from "./theme";
+import { AltTab3D } from "./components/AltTab3D";
 
 // ─── App Volume Mixer ───────────────────────────────────────────────────────
 
@@ -581,6 +582,7 @@ function OverlayApp() {
 	const [mode, setMode] = useState<Mode>("idle");
 	const [updateStatus, setUpdateStatus] = useState<string>("checking");
 	const [updateProgress, setUpdateProgress] = useState(0);
+	const [altTabOpen, setAltTabOpen] = useState(false);
 
 	// Volume state
 	const [volume, setVolume] = useState(0.5);
@@ -810,7 +812,7 @@ function OverlayApp() {
 					hideWindowTimeoutRef.current = null;
 				}
 
-				if (mode === "idle") {
+				if (mode === "idle" && !altTabOpen) {
 					// Wait for exit animation to finish before hiding
 					hideWindowTimeoutRef.current = setTimeout(async () => {
 						await appWindow.hide();
@@ -833,7 +835,7 @@ function OverlayApp() {
 		return () => {
 			if (hideWindowTimeoutRef.current) clearTimeout(hideWindowTimeoutRef.current);
 		};
-	}, [mode]);
+	}, [mode, altTabOpen]);
 
 	// ── Volume Controls ──
 	const sendVolume = useTrailingThrottle((newVol: number) => {
@@ -994,6 +996,9 @@ function OverlayApp() {
 					</AnimatePresence>
 				</div>
 			)}
+
+			{/* 3D Alt+Tab Window Switcher */}
+			<AltTab3D onOpenChange={setAltTabOpen} />
 		</div>
 	);
 }

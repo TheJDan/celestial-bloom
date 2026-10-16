@@ -54,6 +54,9 @@ export function useSettings() {
 	const [brightnessEdgeEnabled, setBrightnessEdgeEnabled] = useState(
 		() => localStorage.getItem("bloom-brightness-edge-enabled") !== "false"
 	);
+	const [altTab3dEnabled, setAltTab3dEnabled] = useState(
+		() => localStorage.getItem("bloom-alt-tab-3d-enabled") !== "false"
+	);
 	const [mediaAmbienceEnabled, setMediaAmbienceEnabled] = useState(true);
 	const [mediaCompactGlowEnabled, setMediaCompactGlowEnabled] = useState(true);
 	const [mediaLayout, setMediaLayout] = useState<"classic" | "compact">(
@@ -137,6 +140,12 @@ export function useSettings() {
 	const [scale, setScale] = useState(() =>
 		parseFloat(localStorage.getItem("bloom-scale") || "1.0")
 	);
+	const [dockScale, setDockScale] = useState(() =>
+		parseFloat(localStorage.getItem("bloom-dock-scale") || localStorage.getItem("bloom-scale") || "1.0")
+	);
+	const [notchScale, setNotchScale] = useState(() =>
+		parseFloat(localStorage.getItem("bloom-notch-scale") || localStorage.getItem("bloom-scale") || "1.0")
+	);
 	const [themeMode, setThemeMode] = useState(
 		() => localStorage.getItem("bloom-theme-mode") || "dark"
 	);
@@ -201,6 +210,7 @@ export function useSettings() {
 			apply(getVal("bloom-auto-update"), setAutoUpdate, readBool);
 			apply(getVal("bloom-volume-edge-enabled"), setVolumeEdgeEnabled, readBool);
 			apply(getVal("bloom-brightness-edge-enabled"), setBrightnessEdgeEnabled, readBool);
+			apply(getVal("bloom-alt-tab-3d-enabled"), setAltTab3dEnabled, readBool);
 			apply(getVal("bloom-dock-enabled"), setDockEnabled, readBool);
 			apply(getVal("bloom-dock-preview-enabled"), setDockPreviewEnabled, readBool);
 			apply(getVal("bloom-dock-icon-only"), setDockIconOnly, readBool);
@@ -216,6 +226,8 @@ export function useSettings() {
 
 			apply(getVal("bloom-temp-unit"), setTempUnitFahrenheit, (v) => v === "fahrenheit");
 			apply(getVal("bloom-scale"), setScale, parseFloat);
+			apply(getVal("bloom-dock-scale") ?? getVal("bloom-scale"), setDockScale, parseFloat);
+			apply(getVal("bloom-notch-scale") ?? getVal("bloom-scale"), setNotchScale, parseFloat);
 			apply(getVal("bloom-low-battery-threshold"), setLowBatteryThreshold, parseInt);
 
 			apply(getVal("bloom-notch-mode"), setNotchMode, (v) => (v === "auto-hide" ? "smart" : v));
@@ -507,6 +519,12 @@ export function useSettings() {
 		saveSetting("bloom-brightness-edge-enabled", String(next));
 	};
 
+	const toggleAltTab3d = () => {
+		const next = !altTab3dEnabled;
+		setAltTab3dEnabled(next);
+		saveSetting("bloom-alt-tab-3d-enabled", String(next));
+	};
+
 	const toggleAmbience = () => {
 		const next = !mediaAmbienceEnabled;
 		setMediaAmbienceEnabled(next);
@@ -666,6 +684,16 @@ export function useSettings() {
 	const handleScaleChange = (val: number) => {
 		setScale(val);
 		saveSetting("bloom-scale", val.toString());
+	};
+
+	const handleDockScaleChange = (val: number) => {
+		setDockScale(val);
+		saveSetting("bloom-dock-scale", val.toString());
+	};
+
+	const handleNotchScaleChange = (val: number) => {
+		setNotchScale(val);
+		saveSetting("bloom-notch-scale", val.toString());
 	};
 
 	const handleWidgetsChange = (config: WidgetConfig) => {
@@ -859,6 +887,10 @@ export function useSettings() {
 		toggleUpdateIndicator,
 		scale,
 		handleScaleChange,
+		dockScale,
+		handleDockScaleChange,
+		notchScale,
+		handleNotchScaleChange,
 		cornersEnabled,
 		toggleCorners,
 
@@ -957,6 +989,8 @@ export function useSettings() {
 		toggleBrightnessOverlay,
 		brightnessEdgeEnabled,
 		toggleBrightnessEdge,
+		altTab3dEnabled,
+		toggleAltTab3d,
 
 		// Updates
 		updateStatus,

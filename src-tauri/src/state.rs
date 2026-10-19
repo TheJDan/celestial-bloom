@@ -87,4 +87,23 @@ pub static PROCESS_NAME_CACHE: OnceLock<Mutex<HashMap<String, String>>> = OnceLo
 
 pub static THUMBNAIL_CACHE: OnceLock<Mutex<HashMap<isize, (String, i64)>>> = OnceLock::new();
 pub static FOCUS_TIMESTAMPS: OnceLock<Mutex<HashMap<isize, i64>>> = OnceLock::new();
+pub static MRU_HISTORY: OnceLock<Mutex<Vec<isize>>> = OnceLock::new();
+pub static PROCESS_PATH_CACHE: OnceLock<Mutex<HashMap<u32, (String, String)>>> = OnceLock::new();
 pub static SETTINGS_CACHE: OnceLock<Mutex<HashMap<String, serde_json::Value>>> = OnceLock::new();
+
+pub fn record_mru_focus(hwnd: isize) {
+    if hwnd == 0 {
+        return;
+    }
+    if let Some(lock) = MRU_HISTORY.get() {
+        if let Ok(mut list) = lock.lock() {
+            if let Some(pos) = list.iter().position(|&h| h == hwnd) {
+                list.remove(pos);
+            }
+            list.insert(0, hwnd);
+            if list.len() > 100 {
+                list.truncate(100);
+            }
+        }
+    }
+}

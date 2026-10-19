@@ -55,7 +55,7 @@ export function useSettings() {
 		() => localStorage.getItem("bloom-brightness-edge-enabled") !== "false"
 	);
 	const [altTab3dEnabled, setAltTab3dEnabled] = useState(
-		() => localStorage.getItem("bloom-alt-tab-3d-enabled") !== "false"
+		() => localStorage.getItem("bloom-alt-tab-3d-enabled") === "true"
 	);
 	const [mediaAmbienceEnabled, setMediaAmbienceEnabled] = useState(true);
 	const [mediaCompactGlowEnabled, setMediaCompactGlowEnabled] = useState(true);
@@ -210,7 +210,7 @@ export function useSettings() {
 			apply(getVal("bloom-auto-update"), setAutoUpdate, readBool);
 			apply(getVal("bloom-volume-edge-enabled"), setVolumeEdgeEnabled, readBool);
 			apply(getVal("bloom-brightness-edge-enabled"), setBrightnessEdgeEnabled, readBool);
-			apply(getVal("bloom-alt-tab-3d-enabled"), setAltTab3dEnabled, readBool);
+			apply(getVal("bloom-alt-tab-3d-enabled"), setAltTab3dEnabled, (v) => v === "true");
 			apply(getVal("bloom-dock-enabled"), setDockEnabled, readBool);
 			apply(getVal("bloom-dock-preview-enabled"), setDockPreviewEnabled, readBool);
 			apply(getVal("bloom-dock-icon-only"), setDockIconOnly, readBool);

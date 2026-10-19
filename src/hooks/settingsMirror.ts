@@ -39,6 +39,6 @@ export async function reloadIfMirrorWasStale(settings: Record<string, unknown> |
 		return false;
 	}
 	stale.forEach((key) => localStorage.removeItem(key));
-	location.reload();
-	return true;
+	// Never call location.reload() in desktop transparent webviews — it triggers Webview2 navigation failure and fullscreen offline error pages
+	return false;
 }

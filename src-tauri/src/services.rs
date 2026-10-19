@@ -31,6 +31,10 @@ static WIN_NUMBER_HELD: AtomicU8 = AtomicU8::new(0);
 pub static ALT_KEY_HELD: AtomicBool = AtomicBool::new(false);
 pub static ALT_TAB_ACTIVE: AtomicBool = AtomicBool::new(false);
 pub static WIN_TAB_ACTIVE: AtomicBool = AtomicBool::new(false);
+pub static SPOTLIGHT_ACTIVE: AtomicBool = AtomicBool::new(false);
+pub static QUICK_LOOK_ACTIVE: AtomicBool = AtomicBool::new(false);
+pub static EXPOSE_ACTIVE: AtomicBool = AtomicBool::new(false);
+pub static CURRENT_ACTIVE_HWND: AtomicIsize = AtomicIsize::new(0);
 
 /// Virtual key Microsoft documents as "unassigned", used as the mask key.
 /// See `send_start_menu_mask`.
@@ -40,39 +44,62 @@ const MASK_VK: u16 = 0xE8;
 static KEYBOARD_HOOK: AtomicIsize = AtomicIsize::new(0);
 
 /// Win+1-9 and 3D Alt+Tab need a global keyboard hook to intercept keystrokes
-/// before Windows shell claims them.
+/// before Windows shell claims them. Runs on a dedicated thread with an independent
+/// message loop to guarantee it never blocks the UI or drops keystrokes.
 pub fn setup_keyboard_hook(app_handle: AppHandle) {
-    let _ = KEYBOARD_HOOK_APP_HANDLE.set(app_handle.clone());
-    std::thread::spawn(move || {
-        // Exiting removes the hook with the process; never touch it mid-shutdown.
-        while !SHUTTING_DOWN.load(Ordering::Relaxed) {
-            let wanted = (NATIVE_TASKBAR_HIDDEN.load(Ordering::Relaxed) && dock_win_number_enabled())
-                || alt_tab_3d_enabled();
-            if wanted != (KEYBOARD_HOOK.load(Ordering::Relaxed) != 0) {
-                // A low-level hook runs on the thread that installed it, which
-                // needs a message loop, so install and remove it on the main thread.
-                let _ = app_handle.run_on_main_thread(move || set_keyboard_hook(wanted));
-            }
-            std::thread::sleep(Duration::from_millis(500));
-        }
-    });
-}
+    let _ = KEYBOARD_HOOK_APP_HANDLE.set(app_handle);
+    std::thread::Builder::new()
+        .name("bloom-keyboard-hook".into())
+        .spawn(move || unsafe {
+            use windows::Win32::UI::WindowsAndMessaging::{
+                DispatchMessageW, GetMessageW, KillTimer, SetTimer, SetWindowsHookExW,
+                TranslateMessage, UnhookWindowsHookEx, MSG, WH_KEYBOARD_LL, WM_TIMER,
+            };
 
-fn set_keyboard_hook(enabled: bool) {
-    use windows::Win32::UI::WindowsAndMessaging::{UnhookWindowsHookEx, HHOOK, WH_KEYBOARD_LL};
-    let current = KEYBOARD_HOOK.load(Ordering::Relaxed);
-    unsafe {
-        if enabled && current == 0 {
-            if let Ok(hook) = SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_hook_proc), None, 0) {
-                KEYBOARD_HOOK.store(hook.0 as isize, Ordering::Relaxed);
+            let mut message = MSG::default();
+            let timer = SetTimer(None, 2, 500, None);
+            let mut hook = SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_hook_proc), None, 0).ok();
+            if let Some(h) = hook {
+                KEYBOARD_HOOK.store(h.0 as isize, Ordering::Relaxed);
             }
-        } else if !enabled && current != 0 {
-            let _ = UnhookWindowsHookEx(HHOOK(current as *mut _));
-            KEYBOARD_HOOK.store(0, Ordering::Relaxed);
-            WIN_KEY_DOWN.store(false, Ordering::Relaxed);
-            WIN_NUMBER_HELD.store(0, Ordering::Relaxed);
-        }
-    }
+
+            while GetMessageW(&mut message, None, 0, 0).0 > 0 {
+                if message.message == WM_TIMER && message.wParam.0 == timer {
+                    if SHUTTING_DOWN.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    // Watchdog: If Alt+Tab was marked active but Alt is not physically pressed, auto-commit
+                    if ALT_TAB_ACTIVE.load(Ordering::Relaxed) && !alt_key_physically_down() {
+                        ALT_TAB_ACTIVE.store(false, Ordering::Relaxed);
+                        send_start_menu_mask();
+                        dismiss_native_task_switcher();
+                        if let Some(app) = KEYBOARD_HOOK_APP_HANDLE.get().cloned() {
+                            tauri::async_runtime::spawn(async move {
+                                let _ = app.emit_to("overlay", "alt-tab-commit", ());
+                            });
+                        }
+                    }
+                    if hook.is_none() {
+                        hook = SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_hook_proc), None, 0).ok();
+                        if let Some(h) = hook {
+                            KEYBOARD_HOOK.store(h.0 as isize, Ordering::Relaxed);
+                        }
+                    }
+                } else {
+                    let _ = TranslateMessage(&message);
+                    DispatchMessageW(&message);
+                }
+            }
+
+            if timer != 0 {
+                let _ = KillTimer(None, timer);
+            }
+            if let Some(h) = hook {
+                let _ = UnhookWindowsHookEx(h);
+                KEYBOARD_HOOK.store(0, Ordering::Relaxed);
+            }
+        })
+        .expect("Failed to spawn bloom-keyboard-hook thread");
 }
 
 /// Maps the top-row digit keys `1`-`9` to the zero-based dock slot.
@@ -83,24 +110,30 @@ fn win_number_index(vk: u16) -> Option<u8> {
     }
 }
 
+/// 3D Alt+Tab window switcher setting cache
+pub static ALT_TAB_3D_ENABLED: AtomicBool = AtomicBool::new(false);
+pub static DOCK_WIN_NUMBER_ENABLED: AtomicBool = AtomicBool::new(true);
+
 /// The dock's Win+Number replacement can be turned off in Settings > Dock.
 fn dock_win_number_enabled() -> bool {
-    let Some(app) = KEYBOARD_HOOK_APP_HANDLE.get() else {
-        return true;
-    };
-    crate::utils::get_setting_str(app, "bloom-dock-win-number-enabled")
-        .map(|v| v != "false")
-        .unwrap_or(true)
+    DOCK_WIN_NUMBER_ENABLED.load(Ordering::Relaxed)
 }
 
 /// 3D Alt+Tab window switcher can be toggled in Settings > Overlays
 pub fn alt_tab_3d_enabled() -> bool {
-    let Some(app) = KEYBOARD_HOOK_APP_HANDLE.get() else {
-        return true;
-    };
-    crate::utils::get_setting_str(app, "bloom-alt-tab-3d-enabled")
-        .map(|v| v != "false")
-        .unwrap_or(true)
+    if let Some(cache) = crate::state::SETTINGS_CACHE.get() {
+        if let Ok(settings) = cache.lock() {
+            if let Some(val) = settings.get("bloom-alt-tab-3d-enabled") {
+                if let Some(b) = val.as_bool() {
+                    return b;
+                }
+                if let Some(s) = val.as_str() {
+                    return s == "true";
+                }
+            }
+        }
+    }
+    false
 }
 
 /// Whether one of Bloom's HUD overlays is enabled (`bloom-volume-overlay-enabled`,
@@ -120,6 +153,16 @@ fn win_key_physically_down() -> bool {
     unsafe {
         (GetAsyncKeyState(VK_LWIN.0 as i32) as u16 & 0x8000) != 0
             || (GetAsyncKeyState(VK_RWIN.0 as i32) as u16 & 0x8000) != 0
+    }
+}
+
+/// Physical Alt state straight from the OS.
+fn alt_key_physically_down() -> bool {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LMENU, VK_MENU, VK_RMENU};
+    unsafe {
+        (GetAsyncKeyState(VK_MENU.0 as i32) as u16 & 0x8000) != 0
+            || (GetAsyncKeyState(VK_LMENU.0 as i32) as u16 & 0x8000) != 0
+            || (GetAsyncKeyState(VK_RMENU.0 as i32) as u16 & 0x8000) != 0
     }
 }
 
@@ -163,15 +206,63 @@ pub fn send_start_menu_mask() {
     }
 }
 
-/// Explicitly releases all Alt modifier states so Windows and other apps (games, editors) never get stuck with a pressed Alt key.
+/// Sends a neutral mask keystroke to tell Windows that Alt was part of a combo,
+/// which completely prevents Windows from activating the window's Menu Bar (SC_KEYMENU).
+pub fn send_alt_menu_mask() {
+    send_start_menu_mask();
+}
+
+/// Explicitly releases Windows key modifiers so Windows never stays with a pressed Win key (preventing accidental Win+L locks).
+pub fn release_win_key() {
+    send_start_menu_mask();
+}
+
+/// Explicitly releases all Alt and Win modifier states cleanly by injecting synthetic keyups.
 pub fn release_alt_key() {
+    send_start_menu_mask();
     use windows::Win32::UI::Input::KeyboardAndMouse::{
-        keybd_event, KEYEVENTF_KEYUP, VK_LMENU, VK_MENU, VK_RMENU,
+        SendInput, INPUT, INPUT_0, KEYBDINPUT, KEYEVENTF_KEYUP, VK_LMENU, VK_MENU, VK_RMENU,
     };
+    let inputs = [
+        INPUT {
+            r#type: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: VK_MENU,
+                    wScan: 0,
+                    dwFlags: KEYEVENTF_KEYUP,
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        },
+        INPUT {
+            r#type: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: VK_LMENU,
+                    wScan: 0,
+                    dwFlags: KEYEVENTF_KEYUP,
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        },
+        INPUT {
+            r#type: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: VK_RMENU,
+                    wScan: 0,
+                    dwFlags: KEYEVENTF_KEYUP,
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        },
+    ];
     unsafe {
-        keybd_event(VK_LMENU.0 as u8, 0, KEYEVENTF_KEYUP, 0);
-        keybd_event(VK_RMENU.0 as u8, 0, KEYEVENTF_KEYUP, 0);
-        keybd_event(VK_MENU.0 as u8, 0, KEYEVENTF_KEYUP, 0);
+        SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
     }
 }
 
@@ -190,16 +281,17 @@ fn emit_dock_win_number(index: u8) {
 /// Finds and hides any native Windows Task Switcher dialogs (e.g. XamlExplorerHostIslandWindow, TaskSwitcherWnd)
 pub fn dismiss_native_task_switcher() {
     unsafe {
-        use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
+        use windows::Win32::Foundation::{LPARAM, WPARAM};
         use windows::Win32::UI::WindowsAndMessaging::{
-            EnumWindows, FindWindowA, GetClassNameA, IsWindowVisible, PostMessageA, ShowWindow,
-            SW_HIDE, WM_CANCELMODE,
+            FindWindowA, PostMessageA, ShowWindow, SW_HIDE, WM_CANCELMODE,
         };
 
         for cls in &[
             c"XamlExplorerHostIslandWindow",
             c"TaskSwitcherWnd",
             c"MultitaskingViewFrame",
+            c"Shell_InputSwitchTopLevelWindow",
+            c"TopLevelWindowForOverflowXamlIsland",
         ] {
             if let Ok(hwnd) = FindWindowA(windows::core::PCSTR(cls.as_ptr() as *const u8), windows::core::PCSTR::null()) {
                 if !hwnd.0.is_null() {
@@ -208,26 +300,6 @@ pub fn dismiss_native_task_switcher() {
                 }
             }
         }
-
-        unsafe extern "system" fn enum_proc(hwnd: HWND, _: LPARAM) -> windows::core::BOOL {
-            if IsWindowVisible(hwnd).as_bool() {
-                let mut buf = [0u8; 128];
-                let len = GetClassNameA(hwnd, &mut buf);
-                if len > 0 {
-                    if let Ok(cls) = std::str::from_utf8(&buf[..len as usize]) {
-                        if cls == "XamlExplorerHostIslandWindow"
-                            || cls == "TaskSwitcherWnd"
-                            || cls == "MultitaskingViewFrame"
-                        {
-                            let _ = ShowWindow(hwnd, SW_HIDE);
-                            let _ = PostMessageA(Some(hwnd), WM_CANCELMODE, WPARAM(0), LPARAM(0));
-                        }
-                    }
-                }
-            }
-            windows::core::BOOL(1)
-        }
-        let _ = EnumWindows(Some(enum_proc), LPARAM(0));
     }
 }
 
@@ -238,7 +310,7 @@ unsafe extern "system" fn keyboard_hook_proc(
 ) -> windows::Win32::Foundation::LRESULT {
     use windows::Win32::UI::Input::KeyboardAndMouse::{
         GetAsyncKeyState, VIRTUAL_KEY, VK_ESCAPE, VK_LEFT, VK_LMENU, VK_MENU, VK_RETURN,
-        VK_RIGHT, VK_RMENU, VK_SHIFT, VK_TAB, VK_LWIN, VK_RWIN,
+        VK_RIGHT, VK_RMENU, VK_SHIFT, VK_TAB, VK_LWIN, VK_RWIN, VK_SPACE, VK_F3,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
         KBDLLHOOKSTRUCT, LLKHF_INJECTED, WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
@@ -252,15 +324,26 @@ unsafe extern "system" fn keyboard_hook_proc(
         // Only physical presses drive keyboard combos; injected events must not re-enter
         if (kb.flags.0 & LLKHF_INJECTED.0) == 0 {
             let is_alt = vk_code == VK_MENU || vk_code == VK_LMENU || vk_code == VK_RMENU;
-            let alt_phys_down = unsafe {
-                use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_MENU, VK_LMENU, VK_RMENU};
-                (GetAsyncKeyState(VK_MENU.0 as i32) as u16 & 0x8000) != 0
-                    || (GetAsyncKeyState(VK_LMENU.0 as i32) as u16 & 0x8000) != 0
-                    || (GetAsyncKeyState(VK_RMENU.0 as i32) as u16 & 0x8000) != 0
-            };
-            let alt_down = (kb.flags.0 & 0x20) != 0 || ALT_KEY_HELD.load(Ordering::Relaxed) || alt_phys_down;
+            let alt_phys_down = alt_key_physically_down();
+            let alt_context_down = (kb.flags.0 & 0x20) != 0;
 
-            let win_down = WIN_KEY_DOWN.load(Ordering::Relaxed) || win_key_physically_down();
+            // Sanitize: If OS reports Alt is not physically pressed and no context flag, clear ALT_KEY_HELD
+            if !alt_phys_down && !alt_context_down {
+                ALT_KEY_HELD.store(false, Ordering::Relaxed);
+            }
+
+            // Self-healing: If Alt is not held and AltTab was active, immediately commit and dismiss
+            if !is_alt && vk_code != VK_TAB && !alt_phys_down && !alt_context_down {
+                if ALT_TAB_ACTIVE.swap(false, Ordering::Relaxed) {
+                    send_start_menu_mask();
+                    dismiss_native_task_switcher();
+                    if let Some(app) = KEYBOARD_HOOK_APP_HANDLE.get().cloned() {
+                        tauri::async_runtime::spawn(async move {
+                            let _ = app.emit_to("overlay", "alt-tab-commit", ());
+                        });
+                    }
+                }
+            }
 
             // Track physical Alt key state
             if is_alt {
@@ -268,17 +351,167 @@ unsafe extern "system" fn keyboard_hook_proc(
                     ALT_KEY_HELD.store(true, Ordering::Relaxed);
                 } else if is_up {
                     ALT_KEY_HELD.store(false, Ordering::Relaxed);
+                    // ONLY if Alt+Tab was actively open, commit selection cleanly
                     if ALT_TAB_ACTIVE.swap(false, Ordering::Relaxed) {
-                        dismiss_native_task_switcher();
                         send_start_menu_mask();
-                        release_alt_key();
+                        dismiss_native_task_switcher();
                         if let Some(app) = KEYBOARD_HOOK_APP_HANDLE.get().cloned() {
                             tauri::async_runtime::spawn(async move {
                                 let _ = app.emit_to("overlay", "alt-tab-commit", ());
                             });
                         }
-                        // NEVER swallow Alt keyup! Let Windows clear GetKeyState(VK_MENU)
                     }
+                }
+            }
+
+            let alt_down = alt_phys_down || alt_context_down || ALT_KEY_HELD.load(Ordering::Relaxed);
+            let win_down = WIN_KEY_DOWN.load(Ordering::Relaxed) || win_key_physically_down();
+
+            let is_space = vk_code == VK_SPACE;
+            let is_f3 = vk_code == VK_F3;
+
+            let ctrl_phys_down = unsafe {
+                use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_CONTROL, VK_LCONTROL, VK_RCONTROL};
+                (GetAsyncKeyState(VK_CONTROL.0 as i32) as u16 & 0x8000) != 0
+                    || (GetAsyncKeyState(VK_LCONTROL.0 as i32) as u16 & 0x8000) != 0
+                    || (GetAsyncKeyState(VK_RCONTROL.0 as i32) as u16 & 0x8000) != 0
+            };
+
+            // Intercept Alt + Space or Ctrl + Space for Spotlight / Raycast Launcher
+            if is_space && (alt_down || ctrl_phys_down) && !win_down {
+                if is_down {
+                    let active = !SPOTLIGHT_ACTIVE.load(Ordering::Relaxed);
+                    SPOTLIGHT_ACTIVE.store(active, Ordering::Relaxed);
+                    send_start_menu_mask();
+                    if let Some(app) = KEYBOARD_HOOK_APP_HANDLE.get().cloned() {
+                        tauri::async_runtime::spawn(async move {
+                            if active {
+                                if let Some(win) = app.get_webview_window("overlay") {
+                                    crate::services::sync_overlays(&app);
+                                    let _ = win.set_ignore_cursor_events(false);
+                                    let _ = win.show();
+                                    if let Ok(hwnd) = win.hwnd() {
+                                        crate::utils::activate_and_focus_window(hwnd);
+                                    }
+                                    let _ = win.set_focus();
+                                }
+                                let _ = app.emit_to("overlay", "spotlight-toggle", true);
+                            } else {
+                                if let Some(win) = app.get_webview_window("overlay") {
+                                    let _ = win.set_ignore_cursor_events(true);
+                                    if let Ok(hwnd) = win.hwnd() {
+                                        crate::utils::re_assert_topmost(hwnd);
+                                    }
+                                }
+                                let _ = app.emit_to("overlay", "spotlight-toggle", false);
+                            }
+                        });
+                    }
+                    return windows::Win32::Foundation::LRESULT(1);
+                } else if is_up {
+                    return windows::Win32::Foundation::LRESULT(1);
+                }
+            }
+
+            // Quick Look with Space in File Explorer
+            if is_space && !alt_down && !win_down {
+                if QUICK_LOOK_ACTIVE.load(Ordering::Relaxed) {
+                    if is_down {
+                        QUICK_LOOK_ACTIVE.store(false, Ordering::Relaxed);
+                        if let Some(app) = KEYBOARD_HOOK_APP_HANDLE.get().cloned() {
+                            tauri::async_runtime::spawn(async move {
+                                let _ = app.emit_to("overlay", "quick-look-close", ());
+                            });
+                        }
+                    }
+                    return windows::Win32::Foundation::LRESULT(1);
+                } else {
+                    let fg_hwnd = unsafe { windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow() };
+                    if !fg_hwnd.0.is_null() {
+                        let mut class_name = [0u8; 64];
+                        let len = unsafe {
+                            windows::Win32::UI::WindowsAndMessaging::GetClassNameA(fg_hwnd, &mut class_name)
+                        };
+                        let class_str = std::str::from_utf8(&class_name[..len as usize]).unwrap_or("");
+                        if class_str == "CabinetWClass" || class_str == "Progman" || class_str == "WorkerW" {
+                            let mut is_editing = false;
+                            let mut gui_info = windows::Win32::UI::WindowsAndMessaging::GUITHREADINFO {
+                                cbSize: std::mem::size_of::<windows::Win32::UI::WindowsAndMessaging::GUITHREADINFO>() as u32,
+                                ..Default::default()
+                            };
+                            let thread_id = unsafe { windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId(fg_hwnd, None) };
+                            if unsafe { windows::Win32::UI::WindowsAndMessaging::GetGUIThreadInfo(thread_id, &mut gui_info) }.is_ok() {
+                                if !gui_info.hwndFocus.0.is_null() {
+                                    let mut focus_class = [0u8; 64];
+                                    let flen = unsafe {
+                                        windows::Win32::UI::WindowsAndMessaging::GetClassNameA(gui_info.hwndFocus, &mut focus_class)
+                                    };
+                                    let fclass = std::str::from_utf8(&focus_class[..flen as usize]).unwrap_or("");
+                                    if fclass.eq_ignore_ascii_case("Edit") || fclass.contains("RichEdit") {
+                                        is_editing = true;
+                                    }
+                                }
+                            }
+
+                            if !is_editing {
+                                if let Some(path) = crate::utils::get_explorer_selected_item(fg_hwnd) {
+                                    if is_down {
+                                        QUICK_LOOK_ACTIVE.store(true, Ordering::Relaxed);
+                                        if let Some(app) = KEYBOARD_HOOK_APP_HANDLE.get().cloned() {
+                                            tauri::async_runtime::spawn(async move {
+                                                if let Some(win) = app.get_webview_window("overlay") {
+                                                    crate::services::sync_overlays(&app);
+                                                    let _ = win.set_ignore_cursor_events(false);
+                                                    let _ = win.show();
+                                                    if let Ok(hwnd) = win.hwnd() {
+                                                        crate::utils::re_assert_topmost(hwnd);
+                                                    }
+                                                }
+                                                let _ = app.emit_to("overlay", "quick-look-open", path);
+                                            });
+                                        }
+                                        return windows::Win32::Foundation::LRESULT(1);
+                                    } else if is_up {
+                                        return windows::Win32::Foundation::LRESULT(1);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Exposé / Mission Control Grid with F3
+            if is_f3 && !alt_down && !win_down {
+                if is_down {
+                    let active = !EXPOSE_ACTIVE.load(Ordering::Relaxed);
+                    EXPOSE_ACTIVE.store(active, Ordering::Relaxed);
+                    if let Some(app) = KEYBOARD_HOOK_APP_HANDLE.get().cloned() {
+                        tauri::async_runtime::spawn(async move {
+                            if active {
+                                if let Some(win) = app.get_webview_window("overlay") {
+                                    crate::services::sync_overlays(&app);
+                                    let _ = win.set_ignore_cursor_events(false);
+                                    let _ = win.show();
+                                    if let Ok(hwnd) = win.hwnd() {
+                                        crate::utils::re_assert_topmost(hwnd);
+                                    }
+                                }
+                                let _ = app.emit_to("overlay", "expose-toggle", true);
+                            } else {
+                                if let Some(win) = app.get_webview_window("overlay") {
+                                    let _ = win.set_ignore_cursor_events(true);
+                                    if let Ok(hwnd) = win.hwnd() {
+                                        crate::utils::re_assert_topmost(hwnd);
+                                    }
+                                }
+                                let _ = app.emit_to("overlay", "expose-toggle", false);
+                            }
+                        });
+                    }
+                    return windows::Win32::Foundation::LRESULT(1);
+                } else if is_up {
+                    return windows::Win32::Foundation::LRESULT(1);
                 }
             }
 
@@ -320,8 +553,9 @@ unsafe extern "system" fn keyboard_hook_proc(
                                     let _ = win.set_ignore_cursor_events(false);
                                     let _ = win.show();
                                     if let Ok(hwnd) = win.hwnd() {
-                                        crate::utils::re_assert_topmost(hwnd);
+                                        crate::utils::activate_and_focus_window(hwnd);
                                     }
+                                    let _ = win.set_focus();
                                 }
                                 let _ = app.emit_to("overlay", "win-tab-open", ());
                             });
@@ -335,27 +569,53 @@ unsafe extern "system" fn keyboard_hook_proc(
             }
 
             // Intercept Alt + Tab for 3D Switcher
-            if is_tab && (alt_down || is_alt_tab_active) && !win_down && alt_tab_3d_enabled() {
+            let alt_is_active = alt_down;
+            if is_tab && (alt_is_active || is_alt_tab_active) && !win_down && alt_tab_3d_enabled() {
                 if is_down {
+                    if is_alt_tab_active && !alt_is_active {
+                        // User already released Alt; commit selection immediately instead of stepping
+                        ALT_TAB_ACTIVE.store(false, Ordering::Relaxed);
+                        dismiss_native_task_switcher();
+                        send_start_menu_mask();
+                        if let Some(app) = KEYBOARD_HOOK_APP_HANDLE.get().cloned() {
+                            tauri::async_runtime::spawn(async move {
+                                let _ = app.emit_to("overlay", "alt-tab-commit", ());
+                            });
+                        }
+                        return windows::Win32::Foundation::LRESULT(1);
+                    }
+                    dismiss_native_task_switcher();
                     let is_shift = unsafe {
                         (GetAsyncKeyState(VK_SHIFT.0 as i32) as u16 & 0x8000) != 0
                     };
                     let dir: i32 = if is_shift { -1 } else { 1 };
 
                     if !is_alt_tab_active {
+                        // Capture the active foreground window before overlay steals focus
+                        let fg = unsafe { windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow() };
+                        let fg_raw = if !fg.0.is_null() {
+                            let root = unsafe { windows::Win32::UI::WindowsAndMessaging::GetAncestor(fg, windows::Win32::UI::WindowsAndMessaging::GA_ROOTOWNER) };
+                            if !root.0.is_null() { root.0 as isize } else { fg.0 as isize }
+                        } else {
+                            0
+                        };
+                        if fg_raw != 0 {
+                            CURRENT_ACTIVE_HWND.store(fg_raw, Ordering::Relaxed);
+                            crate::state::record_mru_focus(fg_raw);
+                        }
+
                         ALT_TAB_ACTIVE.store(true, Ordering::Relaxed);
                         WIN_TAB_ACTIVE.store(false, Ordering::Relaxed);
                         dismiss_native_task_switcher();
-                        // Continually suppress native Windows Alt+Tab while Bloom's switcher is active
-                        tauri::async_runtime::spawn(async move {
-                            while ALT_TAB_ACTIVE.load(Ordering::Relaxed) {
-                                dismiss_native_task_switcher();
-                                tokio::time::sleep(tokio::time::Duration::from_millis(30)).await;
-                            }
-                            dismiss_native_task_switcher();
-                        });
                         if let Some(app) = KEYBOARD_HOOK_APP_HANDLE.get().cloned() {
                             tauri::async_runtime::spawn(async move {
+                                if fg_raw != 0 {
+                                    if let Some(map) = crate::state::FOCUS_TIMESTAMPS.get() {
+                                        if let Ok(mut guard) = map.lock() {
+                                            guard.insert(fg_raw, crate::utils::get_now_ms());
+                                        }
+                                    }
+                                }
                                 if let Some(win) = app.get_webview_window("overlay") {
                                     crate::services::sync_overlays(&app);
                                     let _ = win.set_ignore_cursor_events(false);
@@ -372,11 +632,6 @@ unsafe extern "system" fn keyboard_hook_proc(
                         dismiss_native_task_switcher();
                         if let Some(app) = KEYBOARD_HOOK_APP_HANDLE.get().cloned() {
                             tauri::async_runtime::spawn(async move {
-                                if let Some(win) = app.get_webview_window("overlay") {
-                                    if let Ok(hwnd) = win.hwnd() {
-                                        crate::utils::re_assert_topmost(hwnd);
-                                    }
-                                }
                                 let _ = app.emit_to("overlay", "alt-tab-step", dir);
                             });
                         }
@@ -463,6 +718,55 @@ unsafe extern "system" fn keyboard_hook_proc(
                 }
             }
 
+            if vk_code == VK_ESCAPE && is_down {
+                let mut handled = false;
+                if SPOTLIGHT_ACTIVE.swap(false, Ordering::Relaxed) {
+                    handled = true;
+                    if let Some(app) = KEYBOARD_HOOK_APP_HANDLE.get().cloned() {
+                        tauri::async_runtime::spawn(async move {
+                            if let Some(win) = app.get_webview_window("overlay") {
+                                let _ = win.set_ignore_cursor_events(true);
+                                if let Ok(hwnd) = win.hwnd() {
+                                    crate::utils::re_assert_topmost(hwnd);
+                                }
+                            }
+                            let _ = app.emit_to("overlay", "spotlight-toggle", false);
+                        });
+                    }
+                }
+                if QUICK_LOOK_ACTIVE.swap(false, Ordering::Relaxed) {
+                    handled = true;
+                    if let Some(app) = KEYBOARD_HOOK_APP_HANDLE.get().cloned() {
+                        tauri::async_runtime::spawn(async move {
+                            if let Some(win) = app.get_webview_window("overlay") {
+                                let _ = win.set_ignore_cursor_events(true);
+                                if let Ok(hwnd) = win.hwnd() {
+                                    crate::utils::re_assert_topmost(hwnd);
+                                }
+                            }
+                            let _ = app.emit_to("overlay", "quick-look-close", ());
+                        });
+                    }
+                }
+                if EXPOSE_ACTIVE.swap(false, Ordering::Relaxed) {
+                    handled = true;
+                    if let Some(app) = KEYBOARD_HOOK_APP_HANDLE.get().cloned() {
+                        tauri::async_runtime::spawn(async move {
+                            if let Some(win) = app.get_webview_window("overlay") {
+                                let _ = win.set_ignore_cursor_events(true);
+                                if let Ok(hwnd) = win.hwnd() {
+                                    crate::utils::re_assert_topmost(hwnd);
+                                }
+                            }
+                            let _ = app.emit_to("overlay", "expose-toggle", false);
+                        });
+                    }
+                }
+                if handled {
+                    return windows::Win32::Foundation::LRESULT(1);
+                }
+            }
+
             if vk_code == VK_LWIN || vk_code == VK_RWIN {
                 if is_down {
                     WIN_KEY_DOWN.store(true, Ordering::Relaxed);
@@ -470,8 +774,27 @@ unsafe extern "system" fn keyboard_hook_proc(
                     // previous digit's keyup was missed.
                     WIN_NUMBER_HELD.store(0, Ordering::Relaxed);
                 } else if is_up {
-                    WIN_KEY_DOWN.store(false, Ordering::Relaxed);
-                    WIN_NUMBER_HELD.store(0, Ordering::Relaxed);
+                    let was_down = WIN_KEY_DOWN.swap(false, Ordering::Relaxed);
+                    let number_held = WIN_NUMBER_HELD.swap(0, Ordering::Relaxed);
+                    if was_down && number_held == 0 && !WIN_TAB_ACTIVE.load(Ordering::Relaxed) {
+                        let is_fs = CURRENT_FOREGROUND_FULLSCREEN.load(Ordering::Relaxed);
+                        if is_fs {
+                            // When in a fullscreen game, make sure Windows native taskbar and Start Search can appear
+                            unsafe {
+                                use windows::Win32::UI::WindowsAndMessaging::{FindWindowA, ShowWindow, SW_SHOW};
+                                let tray_class = windows::core::PCSTR(c"Shell_TrayWnd".as_ptr() as *const u8);
+                                if let Ok(tray_hwnd) = FindWindowA(tray_class, windows::core::PCSTR::null()) {
+                                    let _ = ShowWindow(tray_hwnd, SW_SHOW);
+                                }
+                            }
+                        } else {
+                            if let Some(app) = KEYBOARD_HOOK_APP_HANDLE.get().cloned() {
+                                tauri::async_runtime::spawn(async move {
+                                    let _ = app.emit("dock-edge-hover", true);
+                                });
+                            }
+                        }
+                    }
                     if WIN_TAB_ACTIVE.load(Ordering::Relaxed) {
                         send_start_menu_mask();
                     }
@@ -713,25 +1036,34 @@ unsafe extern "system" fn focus_event_proc(
     // Foreground moved — e.g. Snipping Tool opened/closed or got minimised.
     CAPTURE_RECHECK.store(true, Ordering::Relaxed);
     use windows::Win32::UI::WindowsAndMessaging::{
-        GetWindowLongW, IsWindow, GWL_EXSTYLE, WS_EX_TOOLWINDOW,
+        GetAncestor, GetWindowLongW, IsWindow, GA_ROOTOWNER, GWL_EXSTYLE, WS_EX_TOOLWINDOW,
     };
 
     if !IsWindow(Some(hwnd)).as_bool() {
         return;
     }
-    let ex_style = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
+
+    let root = GetAncestor(hwnd, GA_ROOTOWNER);
+    let target_hwnd = if !root.0.is_null() && IsWindow(Some(root)).as_bool() {
+        root
+    } else {
+        hwnd
+    };
+
+    let ex_style = GetWindowLongW(target_hwnd, GWL_EXSTYLE) as u32;
     if (ex_style & WS_EX_TOOLWINDOW.0) != 0 {
         return;
     }
 
     let my_pid = std::process::id();
     let mut pid = 0u32;
-    windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId(hwnd, Some(&mut pid));
+    windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId(target_hwnd, Some(&mut pid));
     if pid == my_pid {
         return;
     }
 
-    let hwnd_raw = hwnd.0 as isize;
+    let hwnd_raw = target_hwnd.0 as isize;
+    crate::state::record_mru_focus(hwnd_raw);
     if let Some(map) = crate::state::FOCUS_TIMESTAMPS.get() {
         if let Ok(mut guard) = map.lock() {
             guard.insert(hwnd_raw, crate::utils::get_now_ms());
@@ -1551,7 +1883,26 @@ pub fn setup_system_worker(app_handle: AppHandle) -> Sender<SystemCommand> {
                 .unwrap_or(50),
             Err(_) => 50,
         };
+        if last_brightness == 50 {
+            if let Some(phys) = query_physical_monitor_brightness() {
+                last_brightness = phys;
+            } else if let Some(cache) = crate::state::SETTINGS_CACHE.get() {
+                if let Ok(settings) = cache.lock() {
+                    if let Some(val) = settings.get("bloom-last-brightness") {
+                        if let Some(num) = val.as_u64() {
+                            last_brightness = num as u32;
+                        } else if let Some(s) = val.as_str() {
+                            if let Ok(p) = s.parse::<u32>() {
+                                last_brightness = p;
+                            }
+                        }
+                    }
+                }
+            }
+        }
         CURRENT_BRIGHTNESS.store(last_brightness, Ordering::Relaxed);
+        let _ = handle_brightness
+            .emit("brightness-change", BrightnessChangeEvent { brightness: last_brightness });
         // Brightness keys are handled by Windows or the firmware, so follow the
         // resulting changes as they happen; the overlay then appears at once.
         // Changes Bloom made itself (its slider) are skipped like the poll did.
@@ -1578,15 +1929,23 @@ pub fn setup_system_worker(app_handle: AppHandle) -> Sender<SystemCommand> {
                 std::thread::sleep(std::time::Duration::from_millis(500));
                 continue;
             }
+            let mut detected = None;
             if let Ok(results) = wmi_con.query::<WmiMonitorBrightness>() {
                 if let Some(b) = results.first() {
-                    let brightness = b.current_brightness as u32;
-                    if brightness != last_brightness {
-                        last_brightness = brightness;
-                        CURRENT_BRIGHTNESS.store(brightness, Ordering::Relaxed);
-                        let _ = handle_brightness
-                            .emit("brightness-change", BrightnessChangeEvent { brightness });
-                    }
+                    detected = Some(b.current_brightness as u32);
+                }
+            }
+            if detected.is_none() || detected == Some(50) {
+                if let Some(phys) = query_physical_monitor_brightness() {
+                    detected = Some(phys);
+                }
+            }
+            if let Some(brightness) = detected {
+                if brightness != last_brightness {
+                    last_brightness = brightness;
+                    CURRENT_BRIGHTNESS.store(brightness, Ordering::Relaxed);
+                    let _ = handle_brightness
+                        .emit("brightness-change", BrightnessChangeEvent { brightness });
                 }
             }
             std::thread::sleep(std::time::Duration::from_millis(1500));
@@ -1610,6 +1969,7 @@ pub fn setup_system_worker(app_handle: AppHandle) -> Sender<SystemCommand> {
         let mut last_hwnd = HWND(std::ptr::null_mut());
         let mut last_emit = Instant::now();
         let mut is_known_shell = false;
+        let mut is_known_start = false;
         let my_process_id = std::process::id();
         let mut last_monitor_update = Instant::now() - Duration::from_secs(5);
         let mut cached_scale = 1.0f64;
@@ -1710,19 +2070,34 @@ pub fn setup_system_worker(app_handle: AppHandle) -> Sender<SystemCommand> {
                     let title = String::from_utf16_lossy(&text[..text_len as usize]);
 
                     let is_desktop = class_str == "Progman" || class_str == "WorkerW";
-                    let is_start = (class_str == "Windows.UI.Core.CoreWindow"
-                        || class_str == "SimpleWindow")
-                        && (title == "Start" || title == "Search");
+                    let is_start_class =
+                        class_str == "Windows.UI.Core.CoreWindow" || class_str == "SimpleWindow";
+                    let mut process_id = 0u32;
+                    windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId(
+                        hwnd,
+                        Some(&mut process_id),
+                    );
+                    let is_start = is_start_class
+                        && ((title == "Start" || title == "Search")
+                            || is_start_menu_process(process_id));
                     let is_shell = class_str == "Shell_TrayWnd"
                         || class_str == "Shell_SecondaryTrayWnd"
                         || is_start;
 
                     is_known_shell = is_desktop || is_shell;
+                    is_known_start = is_start;
                 }
 
                 if !hwnd.is_invalid() {
                     if is_known_shell {
-                        should_overlap = false;
+                        if is_known_start {
+                            should_notch_overlap = last_notch_overlap.unwrap_or(true);
+                            should_overlap = false;
+                            let _ = handle_visibility.emit("dock-edge-hover", true);
+                        } else {
+                            should_overlap = false;
+                            should_notch_overlap = false;
+                        }
                         current_is_fs = false;
                     } else {
                         // Current hwnd is now guaranteed to be visible, non-iconic and non-cloaked
@@ -1774,8 +2149,8 @@ pub fn setup_system_worker(app_handle: AppHandle) -> Sender<SystemCommand> {
                                         // It is NOT fullscreen or maximized on Bloom's primary monitor!
                                         current_is_fs = false;
                                         should_maximized = false;
-                                        should_overlap = false;
-                                        should_notch_overlap = false;
+                                        should_overlap = last_dock_overlap.unwrap_or(false);
+                                        should_notch_overlap = last_notch_overlap.unwrap_or(false);
 
                                         // Only a non-maximized floating window can physically extend into the primary monitor
                                         let is_maximized_secondary =
@@ -1912,6 +2287,7 @@ pub fn setup_system_worker(app_handle: AppHandle) -> Sender<SystemCommand> {
                     should_overlap = false;
                     current_is_fs = false;
                     is_known_shell = false;
+                    is_known_start = false;
                 }
 
                 // Only report dock overlap when the dock window is actually visible.
@@ -1973,8 +2349,8 @@ pub fn setup_system_worker(app_handle: AppHandle) -> Sender<SystemCommand> {
                     sync_native_osd(&handle_visibility);
                 }
 
-                // Enforce native taskbar hiding (periodic check)
-                if NATIVE_TASKBAR_HIDDEN.load(Ordering::Relaxed) {
+                // Enforce native taskbar hiding (periodic check) - but do NOT hide if a fullscreen game is in foreground!
+                if NATIVE_TASKBAR_HIDDEN.load(Ordering::Relaxed) && !CURRENT_FOREGROUND_FULLSCREEN.load(Ordering::Relaxed) {
                     use windows::Win32::UI::WindowsAndMessaging::{FindWindowA, IsWindowVisible};
                     let tray_class = windows::core::PCSTR(c"Shell_TrayWnd".as_ptr() as *const u8);
                     let secondary_tray_class =
@@ -2086,6 +2462,119 @@ fn set_physical_monitors_brightness(brightness: u32) {
             LPARAM(brightness as isize),
         );
     }
+}
+
+pub fn query_physical_monitor_brightness() -> Option<u32> {
+    unsafe {
+        use windows::core::BOOL;
+        use windows::Win32::Foundation::{LPARAM, RECT};
+        use windows::Win32::Graphics::Gdi::{EnumDisplayMonitors, HDC, HMONITOR};
+
+        #[repr(C)]
+        #[derive(Clone, Copy)]
+        struct PHYSICAL_MONITOR {
+            h_physical_monitor: usize,
+            sz_physical_monitor_description: [u16; 128],
+        }
+        #[link(name = "dxva2")]
+        extern "system" {
+            fn GetNumberOfPhysicalMonitorsFromHMONITOR(
+                hMonitor: HMONITOR,
+                pdwNumberOfPhysicalMonitors: *mut u32,
+            ) -> BOOL;
+            fn GetPhysicalMonitorsFromHMONITOR(
+                hMonitor: HMONITOR,
+                dwPhysicalMonitorArraySize: u32,
+                pPhysicalMonitorArray: *mut PHYSICAL_MONITOR,
+            ) -> BOOL;
+            fn DestroyPhysicalMonitors(
+                dwPhysicalMonitorArraySize: u32,
+                pPhysicalMonitorArray: *mut PHYSICAL_MONITOR,
+            ) -> BOOL;
+            fn GetMonitorBrightness(
+                hMonitor: usize,
+                pdwMinimumBrightness: *mut u32,
+                pdwCurrentBrightness: *mut u32,
+                pdwMaximumBrightness: *mut u32,
+            ) -> BOOL;
+        }
+
+        unsafe extern "system" fn monitor_query_proc(
+            hmonitor: HMONITOR,
+            _: HDC,
+            _: *mut RECT,
+            lparam: LPARAM,
+        ) -> BOOL {
+            let out_ptr = lparam.0 as *mut Option<u32>;
+            let mut count = 0u32;
+            if GetNumberOfPhysicalMonitorsFromHMONITOR(hmonitor, &mut count).as_bool() && count > 0 {
+                let mut monitors = vec![std::mem::zeroed::<PHYSICAL_MONITOR>(); count as usize];
+                if GetPhysicalMonitorsFromHMONITOR(hmonitor, count, monitors.as_mut_ptr()).as_bool() {
+                    for mon in &monitors {
+                        if mon.h_physical_monitor != 0 {
+                            let mut min_b = 0u32;
+                            let mut cur_b = 0u32;
+                            let mut max_b = 0u32;
+                            if GetMonitorBrightness(mon.h_physical_monitor, &mut min_b, &mut cur_b, &mut max_b).as_bool() {
+                                if (*out_ptr).is_none() {
+                                    *out_ptr = Some(cur_b);
+                                }
+                            }
+                        }
+                    }
+                    let _ = DestroyPhysicalMonitors(count, monitors.as_mut_ptr());
+                }
+            }
+            true.into()
+        }
+
+        let mut res: Option<u32> = None;
+        let _ = EnumDisplayMonitors(
+            None,
+            None,
+            Some(monitor_query_proc),
+            LPARAM(&mut res as *mut _ as isize),
+        );
+        res
+    }
+}
+
+/// Recognizes the native Start/Search surface by its host process. Its window
+/// title is localized, so title-only checks make Smart dock overlap detection
+/// hide the dock on non-English Windows.
+fn is_start_menu_process(process_id: u32) -> bool {
+    if process_id == 0 {
+        return false;
+    }
+    unsafe {
+        use windows::Win32::System::Threading::{
+            OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
+        };
+        use windows::Win32::Foundation::CloseHandle;
+        let Ok(process) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, process_id) else {
+            return false;
+        };
+        let mut buffer = [0u16; 512];
+        let mut length = buffer.len() as u32;
+        let found = QueryFullProcessImageNameW(
+            process,
+            PROCESS_NAME_WIN32,
+            windows::core::PWSTR(buffer.as_mut_ptr()),
+            &mut length,
+        )
+        .is_ok()
+            && is_start_menu_process_path(&String::from_utf16_lossy(&buffer[..length as usize]));
+        let _ = CloseHandle(process);
+        found
+    }
+}
+
+fn is_start_menu_process_path(path: &str) -> bool {
+    let name = std::path::Path::new(path).file_name().and_then(|name| name.to_str());
+    name.is_some_and(|name| {
+        name.eq_ignore_ascii_case("StartMenuExperienceHost.exe")
+            || name.eq_ignore_ascii_case("SearchHost.exe")
+    })
 }
 
 /// Explorer-owned windows that host the Windows 11 volume/brightness flyout.
@@ -3233,6 +3722,105 @@ fn process_mouse_position(app_handle: &AppHandle, cursor: windows::Win32::Founda
         let mon_w = cached_size.0 as i32;
         let mon_h = cached_size.1 as i32;
 
+        let is_inside_primary = cursor.x >= mon_x
+            && cursor.x < (mon_x + mon_w)
+            && cursor.y >= mon_y
+            && cursor.y < (mon_y + mon_h);
+
+        static LAST_HOT_CORNER_TIME: AtomicI64 = AtomicI64::new(0);
+        let fg_fs = CURRENT_FOREGROUND_FULLSCREEN.load(Ordering::Relaxed);
+        let hot_corners_on = crate::utils::get_setting_str(&app_handle, "bloom-hot-corners-enabled")
+            .map(|v| v == "true")
+            .unwrap_or(false);
+
+        if is_inside_primary && !fg_fs && hot_corners_on {
+            let last_hc = LAST_HOT_CORNER_TIME.load(Ordering::Relaxed);
+            if now - last_hc > 1500 {
+                // Top-Left corner: Exposé / F3 (only in single-pixel true corner)
+                if cursor.x <= mon_x + 2 && cursor.y <= mon_y + 2 {
+                    LAST_HOT_CORNER_TIME.store(now, Ordering::Relaxed);
+                    let active = !EXPOSE_ACTIVE.load(Ordering::Relaxed);
+                    EXPOSE_ACTIVE.store(active, Ordering::Relaxed);
+                    let app_clone = app_handle.clone();
+                    tauri::async_runtime::spawn(async move {
+                        if active {
+                            if let Some(win) = app_clone.get_webview_window("overlay") {
+                                crate::services::sync_overlays(&app_clone);
+                                let _ = win.set_ignore_cursor_events(false);
+                                let _ = win.show();
+                                if let Ok(hwnd) = win.hwnd() {
+                                    crate::utils::re_assert_topmost(hwnd);
+                                }
+                            }
+                            let _ = app_clone.emit_to("overlay", "expose-toggle", true);
+                        } else {
+                            if let Some(win) = app_clone.get_webview_window("overlay") {
+                                let _ = win.set_ignore_cursor_events(true);
+                                let _ = win.hide();
+                            }
+                            let _ = app_clone.emit_to("overlay", "expose-toggle", false);
+                        }
+                    });
+                }
+            }
+        }
+
+        if !is_inside_primary {
+            MH_LEFT_EXPIRY_MS.store(0, Ordering::Relaxed);
+            MH_RIGHT_EXPIRY_MS.store(0, Ordering::Relaxed);
+            MH_DOCK_EXPIRY_MS.store(0, Ordering::Relaxed);
+            MH_TOPBAR_EXPIRY_MS.store(0, Ordering::Relaxed);
+            MH_TOP_EDGE_ENTER_MS.store(0, Ordering::Relaxed);
+            MH_TOP_EDGE_ARMED.store(false, Ordering::Relaxed);
+
+            if MH_LAST_LEFT_EDGE_HOVER.swap(0, Ordering::Relaxed) != 0 {
+                let _ = app_handle.emit("volume-edge-hover", false);
+            }
+            if MH_LAST_RIGHT_EDGE_HOVER.swap(0, Ordering::Relaxed) != 0 {
+                let _ = app_handle.emit("brightness-edge-hover", false);
+            }
+            if MH_LAST_EDGE_HOVER.swap(0, Ordering::Relaxed) != 0 {
+                let _ = app_handle.emit("dock-edge-hover", false);
+            }
+            if MH_LAST_TOP_EDGE_HOVER.swap(0, Ordering::Relaxed) != 0 {
+                let _ = app_handle.emit("notch-edge-hover", false);
+            }
+            if NOTCH_IS_HOVERED.swap(false, Ordering::Relaxed) {
+                let _ = app_handle.emit("notch-pointer-left", ());
+            }
+            if DOCK_IS_HOVERED.swap(false, Ordering::Relaxed) {
+                let _ = app_handle.emit("dock-pointer-left", ());
+            }
+
+            let modal_active = ALT_TAB_ACTIVE.load(Ordering::Relaxed)
+                || WIN_TAB_ACTIVE.load(Ordering::Relaxed)
+                || SPOTLIGHT_ACTIVE.load(Ordering::Relaxed)
+                || QUICK_LOOK_ACTIVE.load(Ordering::Relaxed)
+                || EXPOSE_ACTIVE.load(Ordering::Relaxed);
+
+            if !modal_active {
+                if MH_LAST_MAIN_IGNORE.load(Ordering::Relaxed) != 1 {
+                    if let Some(w) = app_handle.get_webview_window("main") {
+                        let _ = w.set_ignore_cursor_events(true);
+                    }
+                    MH_LAST_MAIN_IGNORE.store(1, Ordering::Relaxed);
+                }
+                if MH_LAST_DOCK_IGNORE.load(Ordering::Relaxed) != 1 {
+                    if let Some(w) = app_handle.get_webview_window("dock") {
+                        let _ = w.set_ignore_cursor_events(true);
+                    }
+                    MH_LAST_DOCK_IGNORE.store(1, Ordering::Relaxed);
+                }
+                if MH_LAST_OV_IGNORE.load(Ordering::Relaxed) != 1 {
+                    if let Some(w) = app_handle.get_webview_window("overlay") {
+                        let _ = w.set_ignore_cursor_events(true);
+                    }
+                    MH_LAST_OV_IGNORE.store(1, Ordering::Relaxed);
+                }
+            }
+            return;
+        }
+
         let fg_fs = CURRENT_FOREGROUND_FULLSCREEN.load(Ordering::Relaxed);
 
         // --- Dock Interaction ---
@@ -3250,8 +3838,10 @@ fn process_mouse_position(app_handle: &AppHandle, cursor: windows::Win32::Founda
 
         // --- Left Edge (Volume) ---
         if !fg_fs {
-            let at_left_edge =
-                cursor.x <= (mon_x + 8) && cursor.y >= mon_y && cursor.y <= (mon_y + mon_h);
+            let at_left_edge = cursor.x >= mon_x
+                && cursor.x <= (mon_x + 8)
+                && cursor.y >= mon_y
+                && cursor.y <= (mon_y + mon_h);
 
             // The collapsed card extends past the 8px edge band, so once the
             // edge hover is established, keep it alive while the cursor is
@@ -3300,8 +3890,10 @@ fn process_mouse_position(app_handle: &AppHandle, cursor: windows::Win32::Founda
 
         // --- Right Edge (Brightness) ---
         if !fg_fs {
-            let at_right_edge =
-                cursor.x >= (mon_x + mon_w - 8) && cursor.y >= mon_y && cursor.y <= (mon_y + mon_h);
+            let at_right_edge = cursor.x >= (mon_x + mon_w - 8)
+                && cursor.x <= (mon_x + mon_w)
+                && cursor.y >= mon_y
+                && cursor.y <= (mon_y + mon_h);
 
             if at_right_edge {
                 MH_RIGHT_EXPIRY_MS.store(now + 500, Ordering::Relaxed);
@@ -3367,7 +3959,13 @@ fn process_mouse_position(app_handle: &AppHandle, cursor: windows::Win32::Founda
                     false
                 };
 
-                let should_ignore = if ALT_TAB_ACTIVE.load(Ordering::Relaxed) || WIN_TAB_ACTIVE.load(Ordering::Relaxed) {
+                let modal_active = ALT_TAB_ACTIVE.load(Ordering::Relaxed)
+                    || WIN_TAB_ACTIVE.load(Ordering::Relaxed)
+                    || SPOTLIGHT_ACTIVE.load(Ordering::Relaxed)
+                    || QUICK_LOOK_ACTIVE.load(Ordering::Relaxed)
+                    || EXPOSE_ACTIVE.load(Ordering::Relaxed);
+
+                let should_ignore = if modal_active {
                     false
                 } else {
                     !(over_left || over_right)
@@ -4491,7 +5089,6 @@ pub fn watch_webview_processes(app: &AppHandle) {
             use webview2_com::Microsoft::Web::WebView2::Win32::{
                 COREWEBVIEW2_PROCESS_FAILED_KIND,
                 COREWEBVIEW2_PROCESS_FAILED_KIND_BROWSER_PROCESS_EXITED,
-                COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_EXITED,
             };
             use webview2_com::ProcessFailedEventHandler;
 
@@ -4506,9 +5103,7 @@ pub fn watch_webview_processes(app: &AppHandle) {
                     };
                     let mut kind = COREWEBVIEW2_PROCESS_FAILED_KIND::default();
                     args.ProcessFailedKind(&mut kind)?;
-                    if kind == COREWEBVIEW2_PROCESS_FAILED_KIND_BROWSER_PROCESS_EXITED
-                        || kind == COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_EXITED
-                    {
+                    if kind == COREWEBVIEW2_PROCESS_FAILED_KIND_BROWSER_PROCESS_EXITED {
                         recover_from_webview_failure(&handle);
                     }
                     Ok(())

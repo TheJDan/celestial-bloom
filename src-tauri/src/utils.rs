@@ -52,6 +52,46 @@ pub fn resolve_shortcut(path: &str) -> Option<(String, String)> {
     }
 }
 
+pub fn get_explorer_selected_item(fg_hwnd: HWND) -> Option<String> {
+    unsafe {
+        use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_LOCAL_SERVER, IServiceProvider};
+        use windows::Win32::UI::Shell::{IFolderView, IShellBrowser, IShellItemArray, IShellWindows, ShellWindows, SIGDN_FILESYSPATH};
+
+        let shell_windows: IShellWindows = CoCreateInstance(&ShellWindows, None, CLSCTX_LOCAL_SERVER).ok()?;
+        let count = shell_windows.Count().ok()?;
+        for i in 0..count {
+            let variant_i = windows::Win32::System::Variant::VARIANT::from(i);
+            if let Ok(dispatch) = shell_windows.Item(&variant_i) {
+                if let Ok(service_provider) = dispatch.cast::<IServiceProvider>() {
+                    let sid_browser = windows::core::GUID::from_u128(0x4C96BE40_915C_11CF_99D3_00AA004AE837);
+                    if let Ok(browser) = service_provider.QueryService::<IShellBrowser>(&sid_browser) {
+                        if let Ok(hwnd) = browser.GetWindow() {
+                            if fg_hwnd.0.is_null() || hwnd == fg_hwnd {
+                                if let Ok(view) = browser.QueryActiveShellView() {
+                                    if let Ok(folder_view) = view.cast::<IFolderView>() {
+                                        if let Ok(items) = folder_view.Items::<IShellItemArray>(windows::Win32::UI::Shell::_SVGIO(1)) {
+                                            if let Ok(item) = items.GetItemAt(0) {
+                                                if let Ok(path_ptr) = item.GetDisplayName(SIGDN_FILESYSPATH) {
+                                                    let path = path_ptr.to_string().unwrap_or_default();
+                                                    windows::Win32::System::Com::CoTaskMemFree(Some(path_ptr.as_ptr() as *mut _));
+                                                    if !path.is_empty() {
+                                                        return Some(path);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+}
+
 pub static ORIGINAL_TRAY_RECT: std::sync::Mutex<Option<windows::Win32::Foundation::RECT>> =
     std::sync::Mutex::new(None);
 static ORIGINAL_SEC_TRAY_RECT: std::sync::Mutex<Option<windows::Win32::Foundation::RECT>> =
@@ -1025,6 +1065,60 @@ pub fn re_assert_topmost(hwnd: HWND) {
         let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as usize;
         let new_ex = ex | WS_EX_NOACTIVATE.0 as usize | WS_EX_TOOLWINDOW.0 as usize;
         SetWindowLongPtrW(hwnd, GWL_EXSTYLE, new_ex as isize);
+    }
+}
+
+/// Temporarily activates the overlay window and brings it to the foreground so that
+/// inputs (like Spotlight) can receive keyboard focus and text typing.
+pub fn activate_and_focus_window(hwnd: HWND) {
+    unsafe {
+        use windows::Win32::UI::WindowsAndMessaging::{
+            GetWindowLongPtrW, SetWindowLongPtrW, SetWindowPos, SetForegroundWindow,
+            BringWindowToTop, GetForegroundWindow, GetWindowThreadProcessId,
+            GWL_EXSTYLE, HWND_TOPMOST, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW,
+            WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+        };
+        use windows::Win32::UI::Input::KeyboardAndMouse::SetFocus;
+        use windows::Win32::System::Threading::GetCurrentThreadId;
+
+        extern "system" {
+            fn AttachThreadInput(id_attach: u32, id_attach_to: u32, f_attach: i32) -> i32;
+        }
+
+        // 1. Remove WS_EX_NOACTIVATE from the extended styles
+        let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as usize;
+        let active_ex = (ex & !(WS_EX_NOACTIVATE.0 as usize)) | WS_EX_TOOLWINDOW.0 as usize;
+        let _ = SetWindowLongPtrW(hwnd, GWL_EXSTYLE, active_ex as isize);
+
+        // 2. Attach thread input to bypass Windows foreground lock restrictions
+        let fg = GetForegroundWindow();
+        let cur_thread = GetCurrentThreadId();
+        let fg_thread = if !fg.0.is_null() {
+            GetWindowThreadProcessId(fg, None)
+        } else {
+            0
+        };
+
+        if fg_thread != 0 && fg_thread != cur_thread {
+            AttachThreadInput(cur_thread, fg_thread, 1);
+        }
+
+        let _ = SetWindowPos(
+            hwnd,
+            Some(HWND_TOPMOST),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW,
+        );
+        let _ = BringWindowToTop(hwnd);
+        let _ = SetForegroundWindow(hwnd);
+        let _ = SetFocus(Some(hwnd));
+
+        if fg_thread != 0 && fg_thread != cur_thread {
+            AttachThreadInput(cur_thread, fg_thread, 0);
+        }
     }
 }
 

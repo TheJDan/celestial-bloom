@@ -33,7 +33,6 @@ import { WifiPanel } from "./components/WifiPanel";
 import { BluetoothPanel } from "./components/BluetoothPanel";
 import { AudioOutputPanel } from "./components/AudioOutputPanel";
 import { SystemTrayPanel } from "./components/SystemTrayPanel";
-import { JarvisPanel } from "./components/JarvisPanel";
 import {
 	Cpu,
 	MemoryStick,
@@ -436,8 +435,7 @@ type BloomMode =
 	| "wifi"
 	| "bluetooth"
 	| "system-tray"
-	| "audio-output"
-	| "jarvis";
+	| "audio-output";
 
 interface JarvisStatus {
 	online: boolean;
@@ -639,7 +637,10 @@ function App() {
 	// Names of connected Bluetooth devices, for the controls tile.
 	const [btConnectedNames, setBtConnectedNames] = useState<string[]>([]);
 	const [batterySaverEnabled, setBatterySaverEnabled] = useState(false);
-	const [currentBrightness, setCurrentBrightness] = useState(50);
+	const [currentBrightness, setCurrentBrightness] = useState(() => {
+		const saved = localStorage.getItem("bloom-last-brightness");
+		return saved ? parseInt(saved, 10) : 50;
+	});
 
 	// System metrics for status widgets
 	const [cpuUsage, setCpuUsage] = useState(0);
@@ -1477,8 +1478,7 @@ function App() {
 			prev === "wifi" ||
 			prev === "bluetooth" ||
 			prev === "system-tray" ||
-			prev === "audio-output" ||
-			prev === "jarvis"
+			prev === "audio-output"
 				? restingModeRef.current
 				: prev
 		);
@@ -2219,6 +2219,7 @@ function App() {
 	useEffect(() => {
 		const unlisten = listen<{ brightness: number }>("brightness-change", (event) => {
 			setCurrentBrightness(event.payload.brightness);
+			localStorage.setItem("bloom-last-brightness", String(event.payload.brightness));
 		});
 		return () => {
 			unlisten.then((fn) => fn());
@@ -2385,6 +2386,7 @@ function App() {
 	const handleBrightnessChange = useCallback(
 		(newVal: number) => {
 			setCurrentBrightness(newVal);
+			localStorage.setItem("bloom-last-brightness", String(newVal));
 			sendBrightness(newVal);
 		},
 		[sendBrightness]
@@ -2546,7 +2548,6 @@ function App() {
 		if (bloomMode === "shelf") return 380;
 		if (bloomMode === "command-center" && isOpen) return 350;
 		if (bloomMode === "wifi" || bloomMode === "bluetooth" || bloomMode === "system-tray" || bloomMode === "audio-output") return 360;
-		if (bloomMode === "jarvis") return 380;
 		if (showMusicOnStatusHover) {
 			return 170 + (settingsVisualizerEnabled ? 30 : 0);
 		}
@@ -2557,7 +2558,7 @@ function App() {
 		if (isMusicMode && isOpen) return mediaLayout === "compact" ? 300 : 340;
 		if ((showPowerPulse || showLowBatteryPulse || showUpdatePulse) && !isHovered) return 200;
 
-		let w = 140 - clock24hTrim;
+		let w = 168 - clock24hTrim;
 		if (isMusicMode) {
 			if (settingsVisualizerEnabled && isPlaying) w += 30;
 			if (settingsAlbumArtEnabled) w += 30;
@@ -2587,7 +2588,6 @@ function App() {
 		if (bloomMode === "wifi" || bloomMode === "bluetooth") return 300;
 		if (bloomMode === "system-tray") return 340;
 		if (bloomMode === "audio-output") return 280;
-		if (bloomMode === "jarvis") return 340;
 		if (bloomMode === "status") return 36;
 		if (isMusicMode && isOpen) {
 			const hasProgressBar = (mediaInfo.duration_ms ?? 0) > 0;
@@ -3342,21 +3342,6 @@ function App() {
 									)}
 								</AnimatePresence>
 
-								{/* JARVIS / Coucou Panel */}
-								<AnimatePresence>
-									{bloomMode === "jarvis" && (
-										<motion.div
-											key="jarvis-view"
-											initial={{ opacity: 0 }}
-											animate={{ opacity: 1 }}
-											exit={{ opacity: 0, filter: "blur(4px)", transition: { duration: 0.1 } }}
-											transition={{ type: "spring", stiffness: 400, damping: 30 }}
-										>
-											<JarvisPanel onBack={() => setBloomMode(openingPanel())} />
-										</motion.div>
-									)}
-								</AnimatePresence>
-
 								{/* Command Center Panel */}
 								<AnimatePresence>
 									{bloomMode === "command-center" && (
@@ -3530,6 +3515,16 @@ function App() {
 													title="Notification Center"
 												>
 													<BellIcon />
+												</button>
+												<button
+													className={`cc-circular-btn ${jarvisStatus?.online ? "active" : ""}`}
+													onClick={(e) => {
+														e.stopPropagation();
+														invoke("toggle_coucou_island").catch(() => {});
+													}}
+													title={`Coucou JARVIS: ${jarvisStatus?.state || "Listo"}`}
+												>
+													<Bot size={15} strokeWidth={2.2} />
 												</button>
 												<button
 													className="cc-circular-btn"
@@ -4012,14 +4007,18 @@ function App() {
 							onAnimationComplete={() => reportNotchRect.current()}
 							onClick={(e) => {
 								e.stopPropagation();
-								setIsHovered(true);
-								setBloomMode("jarvis");
-								setIsOpen(true);
+								invoke("toggle_coucou_island").catch(() => {});
 							}}
-							title={`JARVIS: ${jarvisStatus?.state || "Activo"} - Clic para abrir`}
+							onContextMenu={(e) => {
+								e.preventDefault();
+								e.stopPropagation();
+								invoke("toggle_coucou_island").catch(() => {});
+							}}
+							title={`Coucou JARVIS: ${jarvisStatus?.state || "Activo"} - Clic: Abrir Coucou`}
 						>
 							<Bot
-								size={14}
+								size={16}
+								strokeWidth={2.2}
 								style={{
 									color: jarvisStatus?.muted
 										? "#ef4444"

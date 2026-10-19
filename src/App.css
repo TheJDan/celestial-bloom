@@ -189,23 +189,31 @@ img {
 .activity-bubble {
 	--bubble-bg: var(--bloom-bg, rgba(0, 0, 0, 0.8));
 	position: absolute;
-	/* Centred on the 36px collapsed pill. */
-	top: 3px;
-	min-width: 30px;
-	height: 30px;
-	padding: 0;
+	/* Centred on the collapsed pill with generous click area */
+	top: 1px;
+	min-width: 34px;
+	height: 34px;
+	padding: 0 4px;
 	display: flex;
 	align-items: center;
 	justify-content: center;
 	gap: 4px;
 	border: none;
-	border-radius: 10px;
-	/* --notch-bg only exists inside the pill (.bloom), so use the theme
-	   colours it is built from, matching the pill in every theme and fading
-	   with it while it's hovered. */
+	border-radius: 12px;
 	background: transparent;
 	color: var(--bloom-text, white);
 	cursor: pointer;
+	z-index: 50;
+	pointer-events: auto;
+	transition: transform 0.15s cubic-bezier(0.16, 1, 0.3, 1), background-color 0.2s ease;
+}
+
+.activity-bubble:hover {
+	transform: scale(1.08);
+}
+
+.activity-bubble:active {
+	transform: scale(0.95);
 }
 
 .activity-bubble.expanded {

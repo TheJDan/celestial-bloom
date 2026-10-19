@@ -46,7 +46,7 @@ fn main() {
 
     std::env::set_var(
         "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
-        "--disable-background-networking --disable-component-update --disable-features=Translate,OptimizationHints,MediaRouter",
+        "--disable-background-networking --disable-component-update --disable-features=Translate,OptimizationHints,MediaRouter,DefaultBrowserErrorPage --no-default-browser-check",
     );
     unsafe {
         let _ = SetConsoleCtrlHandler(Some(ctrl_handler), true);
@@ -121,6 +121,7 @@ fn main() {
             get_jarvis_status,
             jarvis_toggle_mute,
             jarvis_send_prompt,
+            toggle_coucou_island,
             open_notification_center,
             open_system_tray,
             set_ignore_cursor_events,
@@ -224,7 +225,12 @@ fn main() {
             bluetooth::bluetooth_discovery,
             bluetooth::bluetooth_pair,
             bluetooth::bluetooth_pairing_respond,
-            bluetooth::bluetooth_unpair
+            bluetooth::bluetooth_unpair,
+            get_quick_look_data,
+            close_quick_look,
+            close_spotlight,
+            close_expose,
+            execute_system_command
         ])
         .setup(|app| {
             init_taskbar_marker(app.handle());
@@ -354,6 +360,10 @@ fn main() {
                 let _ = crate::state::THUMBNAIL_CACHE
                     .set(std::sync::Mutex::new(std::collections::HashMap::new()));
                 let _ = crate::state::FOCUS_TIMESTAMPS
+                    .set(std::sync::Mutex::new(std::collections::HashMap::new()));
+                let _ = crate::state::MRU_HISTORY
+                    .set(std::sync::Mutex::new(Vec::new()));
+                let _ = crate::state::PROCESS_PATH_CACHE
                     .set(std::sync::Mutex::new(std::collections::HashMap::new()));
                 // Initialize before the scan so its results are actually stored.
                 let _ = crate::state::INSTALLED_APPS_CACHE.set(std::sync::Mutex::new(Vec::new()));

@@ -13,6 +13,9 @@ import "./Overlay.css";
 import { EdgeSurface } from "./components/EdgeSurface";
 import { initTheme } from "./theme";
 import { AltTab3D } from "./components/AltTab3D";
+import { QuickLookModal } from "./components/QuickLookModal";
+import { SpotlightLauncher } from "./components/SpotlightLauncher";
+import { ExposeGrid } from "./components/ExposeGrid";
 
 // ─── App Volume Mixer ───────────────────────────────────────────────────────
 
@@ -583,6 +586,9 @@ function OverlayApp() {
 	const [updateStatus, setUpdateStatus] = useState<string>("checking");
 	const [updateProgress, setUpdateProgress] = useState(0);
 	const [altTabOpen, setAltTabOpen] = useState(false);
+	const [quickLookOpen, setQuickLookOpen] = useState(false);
+	const [spotlightOpen, setSpotlightOpen] = useState(false);
+	const [exposeOpen, setExposeOpen] = useState(false);
 
 	// Volume state
 	const [volume, setVolume] = useState(0.5);
@@ -596,7 +602,10 @@ function OverlayApp() {
 	);
 
 	// Brightness state
-	const [brightness, setBrightness] = useState(50);
+	const [brightness, setBrightness] = useState(() => {
+		const saved = localStorage.getItem("bloom-last-brightness");
+		return saved ? parseInt(saved, 10) : 50;
+	});
 	const [brightnessOverlayEnabled, setBrightnessOverlayEnabled] = useState(
 		() => localStorage.getItem("bloom-brightness-overlay-enabled") !== "false"
 	);
@@ -652,57 +661,41 @@ function OverlayApp() {
 			.catch(() => {});
 	}, []);
 
-	// ── Splash Detection ──
+	// ── Splash Detection (Silent, no fullscreen takeover) ──
 	useEffect(() => {
-		const firstRun = localStorage.getItem("bloom-first-run") === null;
-		const storedVersion = localStorage.getItem("bloom-app-version");
-
-		const showSplash = (version?: string) => {
-			splashActiveRef.current = true;
-			setMode("splash");
-			invoke("set_splash_fullscreen", { fullscreen: true });
-			if (version) localStorage.setItem("bloom-app-version", version);
-			setTimeout(() => emit("splash-done"), 2800);
-		};
-
-		// First run or old version without version key — splash immediately
-		if (firstRun || storedVersion === null) {
-			showSplash();
-			// Still try to store the version in the background
-			getVersion()
-				.then((v) => localStorage.setItem("bloom-app-version", v))
-				.catch(() => {});
-			return;
-		}
-
-		// Has version key — check if it matches
+		localStorage.setItem("bloom-first-run", "done");
 		getVersion()
-			.then((currentVersion) => {
-				if (storedVersion !== currentVersion) {
-					showSplash(currentVersion);
-				} else {
-					emit("splash-done");
-				}
-			})
-			.catch(() => {
-				// Version check failed — let bloom start
-				emit("splash-done");
-			});
+			.then((v) => localStorage.setItem("bloom-app-version", v))
+			.catch(() => {});
+		splashActiveRef.current = false;
+		setMode("idle");
+		emit("splash-done");
+		invoke("set_splash_fullscreen", { fullscreen: false }).catch(() => {});
 	}, []);
 
 	const onSplashComplete = useCallback(() => {
 		localStorage.setItem("bloom-first-run", "done");
-		setTimeout(() => {
-			splashActiveRef.current = false;
-			setMode("idle");
-			invoke("set_splash_fullscreen", { fullscreen: false });
-		}, 300);
+		splashActiveRef.current = false;
+		setMode("idle");
+		invoke("set_splash_fullscreen", { fullscreen: false }).catch(() => {});
 	}, []);
 
 	// ── Event Listeners ──
 	useEffect(() => {
 		const preventContext = (e: MouseEvent) => e.preventDefault();
 		document.addEventListener("contextmenu", preventContext);
+
+		const handleEscape = (e: KeyboardEvent) => {
+			if (e.key === "Escape") {
+				setMode("idle");
+				setSpotlightOpen(false);
+				setExposeOpen(false);
+				setQuickLookOpen(false);
+				invoke("cancel_alt_tab").catch(() => {});
+				invoke("set_splash_fullscreen", { fullscreen: false }).catch(() => {});
+			}
+		};
+		window.addEventListener("keydown", handleEscape);
 
 		const volPromise = listen("volume-change", (event: any) => {
 			if (splashActiveRef.current || !volumeOverlayEnabled) return;
@@ -733,6 +726,7 @@ function OverlayApp() {
 			invoke("hide_native_osd");
 			const { brightness: newBrightness } = event.payload;
 			setBrightness(newBrightness);
+			localStorage.setItem("bloom-last-brightness", String(newBrightness));
 			setMode("brightness");
 			resetHideTimeout();
 		});
@@ -755,17 +749,30 @@ function OverlayApp() {
 				setUpdateStatus(status);
 				if (progress !== undefined) setUpdateProgress(progress);
 
-				if (status === "checking" || status === "downloading" || status === "installing") {
-					splashActiveRef.current = true;
-					setMode("updating");
-					invoke("set_splash_fullscreen", { fullscreen: true });
-				} else if (status === "done") {
+				if (status === "done") {
 					splashActiveRef.current = false;
 					setMode("idle");
-					invoke("set_splash_fullscreen", { fullscreen: false });
+					invoke("set_splash_fullscreen", { fullscreen: false }).catch(() => {});
 				}
 			}
 		);
+
+		const atOpenPromise = listen("alt-tab-open", () => setAltTabOpen(true));
+		const atWinTabPromise = listen("win-tab-open", () => setAltTabOpen(true));
+		const atCancelPromise = listen("alt-tab-cancel", () => setAltTabOpen(false));
+		const atCommitPromise = listen("alt-tab-commit", () => setAltTabOpen(false));
+		const qlOpenPromise = listen("quick-look-open", () => setQuickLookOpen(true));
+		const qlClosePromise = listen("quick-look-close", () => setQuickLookOpen(false));
+		const spotTogglePromise = listen<boolean | undefined>("spotlight-toggle", (e) => {
+			if (typeof e.payload === "boolean") setSpotlightOpen(e.payload);
+			else setSpotlightOpen((prev) => !prev);
+		});
+		const spotClosePromise = listen("spotlight-close", () => setSpotlightOpen(false));
+		const expTogglePromise = listen<boolean | undefined>("expose-toggle", (e) => {
+			if (typeof e.payload === "boolean") setExposeOpen(e.payload);
+			else setExposeOpen((prev) => !prev);
+		});
+		const expClosePromise = listen("expose-close", () => setExposeOpen(false));
 
 		return () => {
 			volPromise.then((fn) => fn());
@@ -773,6 +780,17 @@ function OverlayApp() {
 			brightPromise.then((fn) => fn());
 			brightEdgePromise.then((fn) => fn());
 			autoUpdatePromise.then((fn) => fn());
+			atOpenPromise.then((fn) => fn());
+			atWinTabPromise.then((fn) => fn());
+			atCancelPromise.then((fn) => fn());
+			atCommitPromise.then((fn) => fn());
+			qlOpenPromise.then((fn) => fn());
+			qlClosePromise.then((fn) => fn());
+			spotTogglePromise.then((fn) => fn());
+			spotClosePromise.then((fn) => fn());
+			expTogglePromise.then((fn) => fn());
+			expClosePromise.then((fn) => fn());
+			window.removeEventListener("keydown", handleEscape);
 			document.removeEventListener("contextmenu", preventContext);
 		};
 	}, [
@@ -812,15 +830,21 @@ function OverlayApp() {
 					hideWindowTimeoutRef.current = null;
 				}
 
-				if (mode === "idle" && !altTabOpen) {
-					// Wait for exit animation to finish before hiding
+				const anyModalOpen = altTabOpen || quickLookOpen || spotlightOpen || exposeOpen;
+				if (mode === "idle" && !anyModalOpen) {
+					// Immediately pass through cursor and clicks to the active application
+					await appWindow.setIgnoreCursorEvents(true).catch(() => {});
+					// Wait for exit animation to finish before hiding window
 					hideWindowTimeoutRef.current = setTimeout(async () => {
-						await appWindow.hide();
-					}, 400);
+						await appWindow.hide().catch(() => {});
+					}, 50);
 				} else {
 					// Position the window first, then show
 					await invoke("sync_overlay_position");
 					await appWindow.show();
+					if (anyModalOpen) {
+						await appWindow.setIgnoreCursorEvents(false).catch(() => {});
+					}
 				}
 			} catch (e) {
 				console.error("Window management error:", e);
@@ -835,7 +859,7 @@ function OverlayApp() {
 		return () => {
 			if (hideWindowTimeoutRef.current) clearTimeout(hideWindowTimeoutRef.current);
 		};
-	}, [mode, altTabOpen]);
+	}, [mode, altTabOpen, quickLookOpen, spotlightOpen, exposeOpen]);
 
 	// ── Volume Controls ──
 	const sendVolume = useTrailingThrottle((newVol: number) => {
@@ -892,6 +916,7 @@ function OverlayApp() {
 	const handleBrightnessChange = useCallback(
 		(newBrightness: number) => {
 			setBrightness(newBrightness);
+			localStorage.setItem("bloom-last-brightness", String(Math.round(newBrightness)));
 			setMode("brightness");
 			resetHideTimeout();
 			sendBrightness(newBrightness);
@@ -999,6 +1024,15 @@ function OverlayApp() {
 
 			{/* 3D Alt+Tab Window Switcher */}
 			<AltTab3D onOpenChange={setAltTabOpen} />
+
+			{/* Quick Look Instant File Preview */}
+			<QuickLookModal onOpenChange={setQuickLookOpen} />
+
+			{/* Spotlight Launcher */}
+			<SpotlightLauncher onOpenChange={setSpotlightOpen} />
+
+			{/* Exposé / Mission Control Grid */}
+			<ExposeGrid onOpenChange={setExposeOpen} />
 		</div>
 	);
 }

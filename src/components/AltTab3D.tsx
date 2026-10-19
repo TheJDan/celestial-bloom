@@ -50,6 +50,9 @@ export function AltTab3D({ onOpenChange }: AltTab3DProps) {
 
 	const isStickyModeRef = useRef(false);
 	isStickyModeRef.current = isStickyMode;
+	const isOpeningRef = useRef(false);
+	const pendingCommitRef = useRef(false);
+	const pendingStepsRef = useRef(0);
 
 	// Notify parent whenever open state changes
 	useEffect(() => {
@@ -78,10 +81,24 @@ export function AltTab3D({ onOpenChange }: AltTab3DProps) {
 	}, [isOpen, windows, iconMap]);
 
 	const commitSelection = useCallback(async (index?: number) => {
+		isOpeningRef.current = false;
+		isOpenRef.current = false;
+		pendingCommitRef.current = false;
+		pendingStepsRef.current = 0;
 		const targetIndex = index !== undefined ? index : selectedIndexRef.current;
 		const target = windowsRef.current[targetIndex];
 
+		// Optimistically update cached MRU order: the target window is now index 0!
+		if (target && windowsRef.current.length > 1 && targetIndex !== 0) {
+			const updated = [...windowsRef.current];
+			updated.splice(targetIndex, 1);
+			updated.unshift(target);
+			windowsRef.current = updated;
+			setWindows(updated);
+		}
+
 		setIsOpen(false);
+		onOpenChange?.(false);
 		setIsStickyMode(false);
 		isStickyModeRef.current = false;
 		setHoverRot({ x: 0, y: 0 });
@@ -101,10 +118,15 @@ export function AltTab3D({ onOpenChange }: AltTab3DProps) {
 		} else {
 			await invoke("cancel_alt_tab").catch(() => {});
 		}
-	}, []);
+	}, [onOpenChange]);
 
 	const cancelSelection = useCallback(async () => {
+		isOpeningRef.current = false;
+		isOpenRef.current = false;
+		pendingCommitRef.current = false;
+		pendingStepsRef.current = 0;
 		setIsOpen(false);
+		onOpenChange?.(false);
 		setIsStickyMode(false);
 		isStickyModeRef.current = false;
 		setHoverRot({ x: 0, y: 0 });
@@ -115,7 +137,7 @@ export function AltTab3D({ onOpenChange }: AltTab3DProps) {
 		hasDraggedRef.current = false;
 		setIsDragging(false);
 		await invoke("cancel_alt_tab").catch(() => {});
-	}, []);
+	}, [onOpenChange]);
 
 	// Setup Tauri event listeners for Alt+Tab and Win+Tab hooks
 	useEffect(() => {
@@ -125,38 +147,110 @@ export function AltTab3D({ onOpenChange }: AltTab3DProps) {
 		let unlistenCommit: (() => void) | undefined;
 		let unlistenCancel: (() => void) | undefined;
 
+		// Pre-warm the window list so opening Alt+Tab is instantaneous (0 ms lag)
+		invoke<AltTabItem[]>("get_alt_tab_windows")
+			.then((list) => {
+				if (list && list.length > 0) {
+					windowsRef.current = list;
+					setWindows(list);
+				}
+			})
+			.catch(() => {});
+
 		const setup = async () => {
 			unlistenOpen = await listen<number>("alt-tab-open", async (event) => {
 				const dir = event.payload || 1;
+				isOpenRef.current = true;
+				isOpeningRef.current = true;
+				pendingCommitRef.current = false;
+				pendingStepsRef.current = 0;
+
+				// Instant 0ms visual feedback if cached windows exist
+				if (windowsRef.current.length > 0) {
+					const count = windowsRef.current.length;
+					const baseInitial = dir > 0 ? (count > 1 ? 1 : 0) : (count > 1 ? count - 1 : 0);
+					selectedIndexRef.current = baseInitial;
+					setSelectedIndex(baseInitial);
+				}
+
+				setIsOpen(true);
+				onOpenChange?.(true);
 				try {
 					const list = await invoke<AltTabItem[]>("get_alt_tab_windows");
 					if (!list || list.length === 0) {
-						await invoke("cancel_alt_tab");
+						isOpeningRef.current = false;
+						isOpenRef.current = false;
+						pendingCommitRef.current = false;
+						await invoke("cancel_alt_tab").catch(() => {});
 						return;
 					}
 
+					// If user already released Alt before get_alt_tab_windows finished:
+					if (pendingCommitRef.current || !isOpenRef.current) {
+						isOpeningRef.current = false;
+						pendingCommitRef.current = false;
+						windowsRef.current = list;
+						setWindows(list);
+						await commitSelection(selectedIndexRef.current);
+						return;
+					}
+
+					// Smoothly update windows list and preserve selected window by HWND
+					const prevSelected = windowsRef.current[selectedIndexRef.current];
 					windowsRef.current = list;
 					setWindows(list);
-					const initial = dir > 0 ? (list.length > 1 ? 1 : 0) : (list.length > 1 ? list.length - 1 : 0);
-					selectedIndexRef.current = initial;
-					setSelectedIndex(initial);
+
+					if (prevSelected) {
+						const foundIdx = list.findIndex((w) => w.hwnd === prevSelected.hwnd);
+						if (foundIdx !== -1) {
+							selectedIndexRef.current = foundIdx;
+							setSelectedIndex(foundIdx);
+						} else {
+							const count = list.length;
+							const clamped = Math.min(selectedIndexRef.current, count - 1);
+							selectedIndexRef.current = Math.max(0, clamped);
+							setSelectedIndex(selectedIndexRef.current);
+						}
+					} else {
+						const count = list.length;
+						const baseInitial = dir > 0 ? (count > 1 ? 1 : 0) : (count > 1 ? count - 1 : 0);
+						selectedIndexRef.current = baseInitial;
+						setSelectedIndex(baseInitial);
+					}
+
 					setHoverRot({ x: 0, y: 0 });
 					setDragRot({ x: 0, y: 0 });
 					dragRotRef.current = { x: 0, y: 0 };
 					setIsStickyMode(false);
 					isStickyModeRef.current = false;
-					setIsOpen(true);
+					isOpeningRef.current = false;
 				} catch (err) {
+					isOpeningRef.current = false;
+					isOpenRef.current = false;
+					pendingCommitRef.current = false;
 					console.error("get_alt_tab_windows error:", err);
-					await invoke("cancel_alt_tab");
+					await invoke("cancel_alt_tab").catch(() => {});
 				}
 			});
 
 			unlistenWinTabOpen = await listen("win-tab-open", async () => {
+				isOpenRef.current = true;
+				setIsStickyMode(true);
+				isStickyModeRef.current = true;
+				if (windowsRef.current.length > 0) {
+					selectedIndexRef.current = 0;
+					setSelectedIndex(0);
+					setHoverRot({ x: 0, y: 0 });
+					setDragRot({ x: 0, y: 0 });
+					dragRotRef.current = { x: 0, y: 0 };
+					setIsOpen(true);
+					onOpenChange?.(true);
+				}
 				try {
 					const list = await invoke<AltTabItem[]>("get_alt_tab_windows");
 					if (!list || list.length === 0) {
-						await invoke("cancel_alt_tab");
+						isOpenRef.current = false;
+						await invoke("cancel_alt_tab").catch(() => {});
 						return;
 					}
 
@@ -170,33 +264,45 @@ export function AltTab3D({ onOpenChange }: AltTab3DProps) {
 					setIsStickyMode(true);
 					isStickyModeRef.current = true;
 					setIsOpen(true);
+					onOpenChange?.(true);
 				} catch (err) {
+					isOpenRef.current = false;
 					console.error("win-tab-open error:", err);
-					await invoke("cancel_alt_tab");
+					await invoke("cancel_alt_tab").catch(() => {});
 				}
 			});
 
 			unlistenStep = await listen<number>("alt-tab-step", (event) => {
 				const dir = event.payload || 1;
-				setSelectedIndex((prev) => {
-					const count = windowsRef.current.length;
-					if (count === 0) return 0;
-					const next = (prev + dir + count) % count;
-					selectedIndexRef.current = next;
-					return next;
-				});
+				const count = windowsRef.current.length;
+				if (count > 0) {
+					setSelectedIndex((prev) => {
+						const next = (prev + dir + count) % count;
+						selectedIndexRef.current = next;
+						return next;
+					});
+				} else {
+					pendingStepsRef.current += dir;
+				}
 			});
 
 			unlistenCommit = await listen("alt-tab-commit", () => {
-				if (isOpenRef.current && !isStickyModeRef.current) {
+				if (isStickyModeRef.current) {
+					return;
+				}
+				if (isOpeningRef.current) {
+					pendingCommitRef.current = true;
+				}
+				if (isOpenRef.current || isOpeningRef.current) {
 					commitSelection();
 				}
 			});
 
 			unlistenCancel = await listen("alt-tab-cancel", () => {
-				if (isOpenRef.current) {
-					cancelSelection();
-				}
+				isOpeningRef.current = false;
+				isOpenRef.current = false;
+				pendingCommitRef.current = false;
+				cancelSelection();
 			});
 		};
 
@@ -254,32 +360,26 @@ export function AltTab3D({ onOpenChange }: AltTab3DProps) {
 			}
 		};
 
-		const handleKeyUp = (e: KeyboardEvent) => {
-			if (e.key === "Alt" && !isStickyModeRef.current) {
-				e.preventDefault();
-				commitSelection();
-			}
-		};
-
 		window.addEventListener("keydown", handleKeyDown, { capture: true });
-		window.addEventListener("keyup", handleKeyUp, { capture: true });
 
 		return () => {
 			window.removeEventListener("keydown", handleKeyDown, { capture: true });
-			window.removeEventListener("keyup", handleKeyUp, { capture: true });
 		};
 	}, [isOpen, commitSelection, cancelSelection]);
 
 	// ── 3D Mouse Parallax, Continuous Drag Rotation & Wheel Handlers ──
 	const handlePointerDown = (e: React.PointerEvent) => {
 		if (e.button !== 0) return;
+		const isCard = (e.target as HTMLElement).closest(".alt-tab-card");
 		isPointerDownRef.current = true;
 		hasDraggedRef.current = false;
 		dragStartRef.current = { x: e.clientX, y: e.clientY };
 		lastPosRef.current = { x: e.clientX, y: e.clientY };
-		try {
-			(e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
-		} catch (_) {}
+		if (!isCard) {
+			try {
+				(e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+			} catch (_) {}
+		}
 	};
 
 	const handlePointerMove = (e: React.PointerEvent) => {
@@ -297,7 +397,7 @@ export function AltTab3D({ onOpenChange }: AltTab3DProps) {
 				e.clientX - dragStartRef.current.x,
 				e.clientY - dragStartRef.current.y
 			);
-			if (totalDist > 5) {
+			if (totalDist > 14) {
 				hasDraggedRef.current = true;
 				if (!isDraggingRef.current) {
 					isDraggingRef.current = true;
@@ -336,7 +436,7 @@ export function AltTab3D({ onOpenChange }: AltTab3DProps) {
 		}
 		setTimeout(() => {
 			hasDraggedRef.current = false;
-		}, 80);
+		}, 30);
 	};
 
 	const handleWheel = (e: React.WheelEvent) => {
@@ -363,7 +463,8 @@ export function AltTab3D({ onOpenChange }: AltTab3DProps) {
 	if (!isOpen || windows.length === 0) return null;
 
 	const activeItem = windows[selectedIndex] || windows[0];
-	const activeIcon = activeItem.icon || iconMap[activeItem.hwnd];
+	if (!activeItem) return null;
+	const activeIcon = activeItem.icon || iconMap[activeItem.hwnd] || null;
 	const rotX = hoverRot.x + dragRot.x;
 	const rotY = hoverRot.y + dragRot.y;
 
@@ -459,16 +560,12 @@ export function AltTab3D({ onOpenChange }: AltTab3DProps) {
 									}}
 									onClick={(e) => {
 										e.stopPropagation();
-										if (hasDraggedRef.current || isDraggingRef.current) return;
-										if (isSelected) {
-											commitSelection(index);
-										} else {
-											setSelectedIndex(index);
-										}
+										if (isDraggingRef.current) return;
+										commitSelection(index);
 									}}
 									onDoubleClick={(e) => {
 										e.stopPropagation();
-										if (hasDraggedRef.current || isDraggingRef.current) return;
+										if (isDraggingRef.current) return;
 										commitSelection(index);
 									}}
 								>

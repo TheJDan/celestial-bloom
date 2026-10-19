@@ -2081,17 +2081,12 @@ pub fn hide_overlay(app: AppHandle) {
 
 #[tauri::command]
 pub fn set_splash_fullscreen(app: AppHandle, fullscreen: bool) {
-    crate::state::OVERLAY_IN_SPLASH.store(fullscreen, Ordering::Relaxed);
+    crate::state::OVERLAY_IN_SPLASH.store(false, Ordering::Relaxed);
     if let Some(win) = app.get_webview_window("overlay") {
         if fullscreen {
+            // NEVER expand to full monitor size or hijack screen
+            let _ = win.set_ignore_cursor_events(true);
             let _ = win.hide();
-            if let Ok(Some(monitor)) = win.primary_monitor() {
-                let size = monitor.size();
-                let pos = monitor.position();
-                let _ = win.set_position(tauri::PhysicalPosition::new(pos.x, pos.y));
-                let _ = win.set_size(tauri::PhysicalSize::new(size.width, size.height));
-            }
-            let _ = win.show();
         } else {
             let _ = win.hide();
             crate::services::sync_overlays(&app);
@@ -3200,7 +3195,28 @@ pub async fn get_volume_state() -> Result<VolumeChangeEvent, String> {
 
 #[tauri::command]
 pub fn get_brightness() -> u32 {
-    crate::state::CURRENT_BRIGHTNESS.load(std::sync::atomic::Ordering::Relaxed)
+    let mut b = crate::state::CURRENT_BRIGHTNESS.load(std::sync::atomic::Ordering::Relaxed);
+    if b == 50 {
+        if let Some(phys) = crate::services::query_physical_monitor_brightness() {
+            crate::state::CURRENT_BRIGHTNESS.store(phys, std::sync::atomic::Ordering::Relaxed);
+            b = phys;
+        } else if let Some(cache) = crate::state::SETTINGS_CACHE.get() {
+            if let Ok(settings) = cache.lock() {
+                if let Some(val) = settings.get("bloom-last-brightness") {
+                    if let Some(num) = val.as_u64() {
+                        b = num as u32;
+                        crate::state::CURRENT_BRIGHTNESS.store(b, std::sync::atomic::Ordering::Relaxed);
+                    } else if let Some(s) = val.as_str() {
+                        if let Ok(parsed) = s.parse::<u32>() {
+                            b = parsed;
+                            crate::state::CURRENT_BRIGHTNESS.store(b, std::sync::atomic::Ordering::Relaxed);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    b
 }
 
 /// Wi-Fi radio and association state, so the notch quick settings tile can show
@@ -3291,6 +3307,7 @@ pub fn set_brightness(app: AppHandle, brightness: u32) {
     let val = brightness.min(100);
     crate::state::CURRENT_BRIGHTNESS.store(val, Ordering::Relaxed);
     crate::state::LAST_BRIGHTNESS_CHANGE.store(crate::utils::get_now_ms(), Ordering::Relaxed);
+    let _ = save_setting(app.clone(), "bloom-last-brightness".to_string(), serde_json::Value::from(val));
     let _ = app.emit(
         "brightness-change",
         BrightnessChangeEvent { brightness: val },
@@ -4321,6 +4338,24 @@ pub async fn jarvis_send_prompt(text: String) -> Result<String, String> {
     .map_err(|e| e.to_string())?
 }
 
+#[tauri::command]
+pub async fn toggle_coucou_island() -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let coucou_path = r"C:\Users\JeanA\AppData\Local\Coucou\Coucou.exe";
+        let local_path = r"C:\Users\JeanA\OneDrive\Desktop\Mark-X.1\Mark-XXXIX-OR\coucou_repo\windows\target\release\coucou.exe";
+        let exe = if std::path::Path::new(coucou_path).exists() {
+            coucou_path
+        } else {
+            local_path
+        };
+        let _ = std::process::Command::new(exe)
+            .arg("--shortcut")
+            .arg("toggleIsland")
+            .spawn();
+    });
+    Ok(())
+}
+
 // ── 3D Alt+Tab Window Switcher ────────────────────────────────────────────────
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
@@ -4339,63 +4374,232 @@ pub async fn get_alt_tab_windows(app: AppHandle) -> Vec<AltTabItem> {
     let _ = &app;
     tauri::async_runtime::spawn_blocking(move || {
         use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_MULTITHREADED};
-        use windows::Win32::UI::WindowsAndMessaging::{GetWindowTextW, IsIconic};
         use windows::Win32::Foundation::HWND;
+        use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED};
+        use windows::Win32::System::Threading::{
+            OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
+        };
+        use windows::Win32::UI::WindowsAndMessaging::{
+            GetAncestor, GetClassNameA, GetDesktopWindow, GetLastActivePopup, GetTopWindow,
+            GetWindow, GetWindowLongW, GetWindowTextW, GetWindowThreadProcessId,
+            IsIconic, IsWindowVisible, GA_ROOTOWNER, GWL_EXSTYLE, GW_HWNDNEXT, GW_OWNER,
+            WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
+        };
 
         let com_initialized = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED).is_ok() };
 
-        let mut raw_apps: Vec<AppInfo> = Vec::new();
-        unsafe {
-            let _ = EnumWindows(
-                Some(enum_windows_proc),
-                LPARAM(&mut raw_apps as *mut Vec<AppInfo> as isize),
-            );
-        }
+        let mut items: Vec<AltTabItem> = Vec::new();
 
-        let mut items = Vec::new();
-        for app_info in raw_apps {
-            let Some(hwnd_raw) = app_info.hwnd else { continue };
-            let hwnd = HWND(hwnd_raw as *mut _);
+        let desktop = unsafe { GetDesktopWindow() };
+        let mut curr_hwnd: Option<HWND> = unsafe { GetTopWindow(Some(desktop)).ok() };
 
-            let mut text = [0u16; 512];
-            let len = unsafe { GetWindowTextW(hwnd, &mut text) };
-            let title = if len > 0 {
-                String::from_utf16_lossy(&text[..len as usize])
-            } else {
-                app_info.name.clone()
-            };
+        while let Some(hwnd) = curr_hwnd {
+            curr_hwnd = unsafe { GetWindow(hwnd, GW_HWNDNEXT).ok() };
+            if hwnd.0.is_null() {
+                break;
+            }
 
-            // Filter out system shell/bloom windows
-            if title == "Bloom" || title == "Bloom Dock" || title == "Overlay" {
+            // 1. Must be visible (minimized windows are still visible in Win32 terms)
+            if !unsafe { IsWindowVisible(hwnd).as_bool() } {
                 continue;
             }
 
-            let is_minimized = unsafe { IsIconic(hwnd).as_bool() };
+            // 2. DWM Cloaked check (skip virtual desktop hidden or suspended UWP apps)
+            let mut cloaked = 0u32;
+            let size = std::mem::size_of::<u32>() as u32;
+            if unsafe {
+                DwmGetWindowAttribute(
+                    hwnd,
+                    DWMWA_CLOAKED,
+                    &mut cloaked as *mut _ as *mut _,
+                    size,
+                )
+            }
+            .is_ok()
+                && cloaked != 0
+            {
+                continue;
+            }
 
-            let cache_key = get_cache_key(&app_info.path, Some(&app_info.name));
+            // 3. Styles check (tool windows are skipped unless they are WS_EX_APPWINDOW)
+            let ex_style = unsafe { GetWindowLongW(hwnd, GWL_EXSTYLE) as u32 };
+            if (ex_style & WS_EX_TOOLWINDOW.0) != 0 && (ex_style & WS_EX_APPWINDOW.0) == 0 {
+                continue;
+            }
+
+            // 4. Owner check: An owned window does not show in Alt-Tab unless it has WS_EX_APPWINDOW
+            if let Ok(owner) = unsafe { GetWindow(hwnd, GW_OWNER) } {
+                if !owner.0.is_null() && (ex_style & WS_EX_APPWINDOW.0) == 0 {
+                    continue;
+                }
+            }
+
+            // 5. Root owner check
+            let root = unsafe { GetAncestor(hwnd, GA_ROOTOWNER) };
+            if root != hwnd && (ex_style & WS_EX_APPWINDOW.0) == 0 {
+                continue;
+            }
+
+            // 6. Active popup check
+            let popup = unsafe { GetLastActivePopup(hwnd) };
+            let target_hwnd = if !popup.0.is_null() && unsafe { IsWindowVisible(popup).as_bool() } {
+                popup
+            } else {
+                hwnd
+            };
+
+            // 7. Non-empty title check
+            let mut text = [0u16; 512];
+            let len = unsafe { GetWindowTextW(target_hwnd, &mut text) };
+            if len == 0 {
+                continue;
+            }
+            let title = String::from_utf16_lossy(&text[..len as usize]);
+
+            let title_lower = title.trim().to_lowercase();
+            // Skip Bloom, Coucou, Mochi, and system shell windows
+            if title_lower == "bloom"
+                || title_lower == "bloom dock"
+                || title_lower == "overlay"
+                || title_lower == "program manager"
+                || title_lower == "coucou"
+                || title_lower == "mochi"
+                || title_lower.starts_with("fr.louisraille.")
+                || title_lower == "contextmenucontainer"
+            {
+                continue;
+            }
+
+            // Window dimension check (skip invisible or 0x0/16x16 dummy message windows)
+            let mut rect = windows::Win32::Foundation::RECT::default();
+            unsafe { let _ = windows::Win32::UI::WindowsAndMessaging::GetWindowRect(target_hwnd, &mut rect); };
+            let width = rect.right - rect.left;
+            let height = rect.bottom - rect.top;
+            if width <= 32 || height <= 32 {
+                continue;
+            }
+
+            // 8. Class name check
+            let mut class_name = [0u8; 256];
+            let class_len = unsafe { GetClassNameA(target_hwnd, &mut class_name) };
+            let window_class = std::str::from_utf8(&class_name[..class_len as usize]).unwrap_or("");
+            if window_class == "XamlExplorerHostIslandWindow"
+                || window_class == "Shell_TrayWnd"
+                || window_class == "Shell_SecondaryTrayWnd"
+                || window_class == "WorkerW"
+                || window_class == "Progman"
+                || window_class == "TaskSwitcherWnd"
+                || window_class == "MultitaskingViewFrame"
+                || window_class == "Shell_InputSwitchTopLevelWindow"
+                || window_class == "TopLevelWindowForOverflowXamlIsland"
+                || window_class == "Windows.UI.Core.CoreWindow"
+            {
+                continue;
+            }
+
+            // 9. Process path check
+            let mut process_id = 0u32;
+            unsafe { GetWindowThreadProcessId(target_hwnd, Some(&mut process_id)) };
+            if process_id == 0 {
+                continue;
+            }
+
+            let (path, name) = {
+                let cached = crate::state::PROCESS_PATH_CACHE.get().and_then(|c| {
+                    c.lock().ok().and_then(|m| m.get(&process_id).cloned())
+                });
+                if let Some(pair) = cached {
+                    pair
+                } else {
+                    let Ok(process_handle) = (unsafe {
+                        OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, process_id)
+                    }) else {
+                        continue;
+                    };
+
+                    let mut path_buf = [0u16; 1024];
+                    let mut path_len = path_buf.len() as u32;
+                    let q_res = unsafe {
+                        QueryFullProcessImageNameW(
+                            process_handle,
+                            PROCESS_NAME_WIN32,
+                            windows::core::PWSTR(path_buf.as_mut_ptr()),
+                            &mut path_len,
+                        )
+                    };
+                    let _ = unsafe { windows::Win32::Foundation::CloseHandle(process_handle) };
+                    if q_res.is_err() {
+                        continue;
+                    }
+
+                    let p = String::from_utf16_lossy(&path_buf[..path_len as usize]);
+                    let n = std::path::Path::new(&p)
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or(&title)
+                        .replace(".exe", "");
+                    if let Some(c) = crate::state::PROCESS_PATH_CACHE.get() {
+                        if let Ok(mut m) = c.lock() {
+                            m.insert(process_id, (p.clone(), n.clone()));
+                        }
+                    }
+                    (p, n)
+                }
+            };
+
+            let lowercase_path = path.to_lowercase();
+
+            // Filter out system shell hosts, search host, conhost, bloom, coucou
+            if lowercase_path.contains("shellexperiencehost.exe")
+                || lowercase_path.contains("searchhost.exe")
+                || lowercase_path.contains("textinputhost.exe")
+                || lowercase_path.contains("conhost.exe")
+                || (lowercase_path.contains("bloom.exe") && title != "Settings")
+                || lowercase_path.contains("coucou.exe")
+            {
+                continue;
+            }
+
+            let hwnd_raw = target_hwnd.0 as isize;
+
+            // Avoid duplicate HWNDs
+            if items.iter().any(|it: &AltTabItem| it.hwnd == hwnd_raw) {
+                continue;
+            }
+
+            let is_minimized = unsafe { IsIconic(target_hwnd).as_bool() };
+            let cache_key = get_cache_key(&path, Some(&name));
             let icon = ICON_CACHE.get().and_then(|c| {
                 c.lock().ok().and_then(|m| m.get(&cache_key).cloned())
             });
 
             let thumbnail = crate::state::THUMBNAIL_CACHE.get().and_then(|c| {
                 c.lock().ok().and_then(|m| m.get(&hwnd_raw).map(|(img, _)| img.clone()))
-            }).or_else(|| {
-                if !is_minimized {
-                    crate::utils::capture_hwnd_to_base64(hwnd, 520, 320)
-                } else {
-                    None
-                }
             });
 
             items.push(AltTabItem {
                 hwnd: hwnd_raw,
                 title,
-                app_name: app_info.name,
-                path: app_info.path,
+                app_name: name,
+                path,
                 icon,
                 thumbnail,
                 is_minimized,
             });
+        }
+
+        // Windows desktop Z-order from GetTopWindow/GetWindow(GW_HWNDNEXT) is already 
+        // the native Most-Recently-Used (MRU) order.
+
+        // Pin the captured active foreground window to index 0 (if present)
+        let active_fg = crate::services::CURRENT_ACTIVE_HWND.load(Ordering::Relaxed);
+        if active_fg != 0 {
+            if let Some(pos) = items.iter().position(|it| it.hwnd == active_fg) {
+                if pos != 0 {
+                    let active_item = items.remove(pos);
+                    items.insert(0, active_item);
+                }
+            }
         }
 
         if com_initialized {
@@ -4409,57 +4613,130 @@ pub async fn get_alt_tab_windows(app: AppHandle) -> Vec<AltTabItem> {
 }
 
 #[tauri::command]
-pub async fn switch_to_window(hwnd: isize) -> Result<(), String> {
+pub async fn switch_to_window(hwnd: isize, app: AppHandle) -> Result<(), String> {
     crate::services::ALT_TAB_ACTIVE.store(false, Ordering::Relaxed);
     crate::services::WIN_TAB_ACTIVE.store(false, Ordering::Relaxed);
+    crate::services::CURRENT_ACTIVE_HWND.store(hwnd, Ordering::Relaxed);
+    crate::state::record_mru_focus(hwnd);
+    if let Some(map) = crate::state::FOCUS_TIMESTAMPS.get() {
+        if let Ok(mut guard) = map.lock() {
+            guard.insert(hwnd, crate::utils::get_now_ms());
+        }
+    }
     crate::services::dismiss_native_task_switcher();
-    crate::services::release_alt_key();
     crate::services::send_start_menu_mask();
+
+    // Hide overlay immediately and restore WS_EX_NOACTIVATE
+    if let Some(win) = app.get_webview_window("overlay") {
+        let _ = win.set_ignore_cursor_events(true);
+        let _ = win.hide();
+        if let Ok(ov_hwnd) = win.hwnd() {
+            crate::utils::re_assert_topmost(ov_hwnd);
+        }
+    }
 
     tauri::async_runtime::spawn_blocking(move || unsafe {
         use windows::Win32::Foundation::HWND;
+        use windows::Win32::UI::Input::KeyboardAndMouse::{keybd_event, SetActiveWindow, SetFocus, KEYEVENTF_KEYUP, VK_MENU};
         use windows::Win32::UI::WindowsAndMessaging::{
-            BringWindowToTop, GetForegroundWindow,
-            GetWindowThreadProcessId, IsIconic, SetForegroundWindow, ShowWindow,
-            SW_RESTORE, SW_SHOW,
+            AllowSetForegroundWindow, BringWindowToTop, GetForegroundWindow,
+            GetWindowThreadProcessId, IsIconic, SetForegroundWindow,
+            SetWindowPos, ShowWindow, SwitchToThisWindow, HWND_NOTOPMOST, HWND_TOPMOST,
+            SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, SW_RESTORE, SW_SHOW,
         };
-        use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
+        use windows::Win32::System::Threading::GetCurrentThreadId;
+
+        extern "system" {
+            fn AttachThreadInput(id_attach: u32, id_attach_to: u32, f_attach: i32) -> i32;
+        }
 
         let target_hwnd = HWND(hwnd as *mut _);
         if target_hwnd.0.is_null() {
             return Err("Invalid HWND".to_string());
         }
 
-        let fg_hwnd = GetForegroundWindow();
-        let cur_thread_id = GetCurrentThreadId();
-        let fg_thread_id = GetWindowThreadProcessId(fg_hwnd, None);
-        let target_thread_id = GetWindowThreadProcessId(target_hwnd, None);
+        let cur_thread = GetCurrentThreadId();
+        let fg = GetForegroundWindow();
+        let fg_thread = if !fg.0.is_null() {
+            GetWindowThreadProcessId(fg, None)
+        } else {
+            0
+        };
 
-        if fg_thread_id != cur_thread_id {
-            let _ = AttachThreadInput(cur_thread_id, fg_thread_id, true);
-        }
-        if target_thread_id != cur_thread_id && target_thread_id != fg_thread_id {
-            let _ = AttachThreadInput(cur_thread_id, target_thread_id, true);
+        let mut target_pid = 0u32;
+        let target_thread = GetWindowThreadProcessId(target_hwnd, Some(&mut target_pid));
+
+        // 1. Allow target process to set foreground window
+        let _ = AllowSetForegroundWindow(u32::MAX);
+        if target_pid != 0 {
+            let _ = AllowSetForegroundWindow(target_pid);
         }
 
+        // 2. Attach thread input to bypass Windows foreground lock restrictions
+        let attached_fg = if fg_thread != 0 && fg_thread != cur_thread {
+            AttachThreadInput(cur_thread, fg_thread, 1) != 0
+        } else {
+            false
+        };
+        let attached_target = if target_thread != 0 && target_thread != cur_thread {
+            AttachThreadInput(cur_thread, target_thread, 1) != 0
+        } else {
+            false
+        };
+
+        // 3. Restore if minimized, or show
         if IsIconic(target_hwnd).as_bool() {
             let _ = ShowWindow(target_hwnd, SW_RESTORE);
         } else {
             let _ = ShowWindow(target_hwnd, SW_SHOW);
         }
 
+        // 4. Synthesize an Alt press/release to grant foreground activation privilege
+        keybd_event(VK_MENU.0 as u8, 0, Default::default(), 0);
+        keybd_event(VK_MENU.0 as u8, 0, KEYEVENTF_KEYUP, 0);
+
+        // 5. Bring to top and set foreground
         let _ = BringWindowToTop(target_hwnd);
         let _ = SetForegroundWindow(target_hwnd);
 
-        if fg_thread_id != cur_thread_id {
-            let _ = AttachThreadInput(cur_thread_id, fg_thread_id, false);
-        }
-        if target_thread_id != cur_thread_id && target_thread_id != fg_thread_id {
-            let _ = AttachThreadInput(cur_thread_id, target_thread_id, false);
+        // 6. If not yet foreground, apply a momentary topmost pulse to guarantee front placement
+        if GetForegroundWindow() != target_hwnd {
+            let _ = SetWindowPos(
+                target_hwnd,
+                Some(HWND_TOPMOST),
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE,
+            );
+            let _ = SetWindowPos(
+                target_hwnd,
+                Some(HWND_NOTOPMOST),
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW,
+            );
+            let _ = SetForegroundWindow(target_hwnd);
         }
 
-        // Final safety release of Alt modifier so the switched app gets clean input
-        crate::services::release_alt_key();
+        // 7. Force focus and activation
+        SwitchToThisWindow(target_hwnd, true);
+        let _ = SetFocus(Some(target_hwnd));
+        let _ = SetActiveWindow(target_hwnd);
+
+        // 8. Detach thread input
+        if attached_fg {
+            AttachThreadInput(cur_thread, fg_thread, 0);
+        }
+        if attached_target {
+            AttachThreadInput(cur_thread, target_thread, 0);
+        }
+
+        // 9. Neutralize menu mask so the target window's menu bar is NEVER activated!
+        crate::services::send_start_menu_mask();
 
         Ok(())
     })
@@ -4468,12 +4745,19 @@ pub async fn switch_to_window(hwnd: isize) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn cancel_alt_tab() {
+pub fn cancel_alt_tab(app: AppHandle) {
     crate::services::ALT_TAB_ACTIVE.store(false, Ordering::Relaxed);
     crate::services::WIN_TAB_ACTIVE.store(false, Ordering::Relaxed);
     crate::services::dismiss_native_task_switcher();
-    crate::services::release_alt_key();
     crate::services::send_start_menu_mask();
+
+    if let Some(win) = app.get_webview_window("overlay") {
+        let _ = win.set_ignore_cursor_events(true);
+        let _ = win.hide();
+        if let Ok(ov_hwnd) = win.hwnd() {
+            crate::utils::re_assert_topmost(ov_hwnd);
+        }
+    }
 }
 
 #[tauri::command]
@@ -4482,11 +4766,12 @@ pub async fn show_3d_switcher(app: AppHandle) -> Result<(), String> {
         crate::services::sync_overlays(&app);
         let _ = win.set_ignore_cursor_events(false);
         let _ = win.show();
-        let _ = win.set_focus();
         if let Ok(hwnd) = win.hwnd() {
-            crate::utils::re_assert_topmost(hwnd);
+            crate::utils::activate_and_focus_window(hwnd);
         }
+        let _ = win.set_focus();
     }
+    let _ = app.emit_to("overlay", "win-tab-open", ());
     Ok(())
 }
 
@@ -4494,6 +4779,209 @@ pub async fn show_3d_switcher(app: AppHandle) -> Result<(), String> {
 pub async fn hide_3d_switcher(app: AppHandle) -> Result<(), String> {
     if let Some(win) = app.get_webview_window("overlay") {
         let _ = win.set_ignore_cursor_events(true);
+        if let Ok(hwnd) = win.hwnd() {
+            crate::utils::re_assert_topmost(hwnd);
+        }
+    }
+    Ok(())
+}
+
+#[derive(serde::Serialize)]
+pub struct QuickLookData {
+    pub path: String,
+    pub name: String,
+    pub extension: String,
+    pub size_bytes: u64,
+    pub modified_ms: u64,
+    pub kind: String, // "image", "video", "audio", "text", "binary"
+    pub content: Option<String>,
+}
+
+#[tauri::command]
+pub async fn get_quick_look_data(path: String) -> Result<QuickLookData, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let p = std::path::Path::new(&path);
+        if !p.exists() {
+            return Err("File does not exist".to_string());
+        }
+        let meta = std::fs::metadata(p).map_err(|e| e.to_string())?;
+        let size_bytes = meta.len();
+        let modified_ms = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+
+        let name = p
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("")
+            .to_string();
+        let ext = p
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_lowercase();
+
+        let (kind, content) = match ext.as_str() {
+            "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "svg" | "ico" => {
+                ("image".to_string(), None)
+            }
+            "mp4" | "webm" | "mkv" | "mov" | "avi" => ("video".to_string(), None),
+            "mp3" | "wav" | "ogg" | "flac" | "m4a" | "aac" => ("audio".to_string(), None),
+            "txt" | "rs" | "ts" | "tsx" | "js" | "jsx" | "json" | "md" | "html" | "css"
+            | "scss" | "py" | "c" | "cpp" | "h" | "hpp" | "toml" | "yaml" | "yml" | "xml"
+            | "log" | "ini" | "bat" | "sh" | "ps1" | "csv" | "sql" => {
+                let bytes = std::fs::read(p).unwrap_or_default();
+                let limit = bytes.len().min(128 * 1024);
+                let s = String::from_utf8_lossy(&bytes[..limit]).to_string();
+                ("text".to_string(), Some(s))
+            }
+            _ => ("binary".to_string(), None),
+        };
+
+        Ok(QuickLookData {
+            path,
+            name,
+            extension: ext,
+            size_bytes,
+            modified_ms,
+            kind,
+            content,
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub fn close_quick_look(app: AppHandle) {
+    crate::services::QUICK_LOOK_ACTIVE.store(false, Ordering::Relaxed);
+    let _ = app.emit_to("overlay", "quick-look-close", ());
+    if let Some(win) = app.get_webview_window("overlay") {
+        let _ = win.set_ignore_cursor_events(true);
+        let _ = win.hide();
+        if let Ok(hwnd) = win.hwnd() {
+            crate::utils::re_assert_topmost(hwnd);
+        }
+    }
+}
+
+#[tauri::command]
+pub fn close_spotlight(app: AppHandle) {
+    crate::services::SPOTLIGHT_ACTIVE.store(false, Ordering::Relaxed);
+    let _ = app.emit_to("overlay", "spotlight-close", ());
+    if let Some(win) = app.get_webview_window("overlay") {
+        let _ = win.set_ignore_cursor_events(true);
+        let _ = win.hide();
+        if let Ok(hwnd) = win.hwnd() {
+            crate::utils::re_assert_topmost(hwnd);
+        }
+    }
+}
+
+#[tauri::command]
+pub fn close_expose(app: AppHandle) {
+    crate::services::EXPOSE_ACTIVE.store(false, Ordering::Relaxed);
+    let _ = app.emit_to("overlay", "expose-close", ());
+    if let Some(win) = app.get_webview_window("overlay") {
+        let _ = win.set_ignore_cursor_events(true);
+        let _ = win.hide();
+        if let Ok(hwnd) = win.hwnd() {
+            crate::utils::re_assert_topmost(hwnd);
+        }
+    }
+}
+
+#[tauri::command]
+pub fn execute_system_command(action: String) -> Result<(), String> {
+    unsafe {
+        use windows::Win32::UI::Shell::ShellExecuteA;
+        use windows::Win32::UI::WindowsAndMessaging::{SW_HIDE, SW_SHOWNORMAL};
+        match action.as_str() {
+            "lock" => {
+                let _ = ShellExecuteA(
+                    None,
+                    windows::core::PCSTR(c"open".as_ptr() as *const u8),
+                    windows::core::PCSTR(c"rundll32.exe".as_ptr() as *const u8),
+                    windows::core::PCSTR(c"user32.dll,LockWorkStation".as_ptr() as *const u8),
+                    windows::core::PCSTR::null(),
+                    SW_SHOWNORMAL,
+                );
+            }
+            "sleep" => {
+                let _ = ShellExecuteA(
+                    None,
+                    windows::core::PCSTR(c"open".as_ptr() as *const u8),
+                    windows::core::PCSTR(c"rundll32.exe".as_ptr() as *const u8),
+                    windows::core::PCSTR(c"powrprof.dll,SetSuspendState".as_ptr() as *const u8),
+                    windows::core::PCSTR::null(),
+                    SW_SHOWNORMAL,
+                );
+            }
+            "restart" => {
+                let _ = ShellExecuteA(
+                    None,
+                    windows::core::PCSTR(c"open".as_ptr() as *const u8),
+                    windows::core::PCSTR(c"shutdown.exe".as_ptr() as *const u8),
+                    windows::core::PCSTR(c"/r /t 0".as_ptr() as *const u8),
+                    windows::core::PCSTR::null(),
+                    SW_HIDE,
+                );
+            }
+            "shutdown" => {
+                let _ = ShellExecuteA(
+                    None,
+                    windows::core::PCSTR(c"open".as_ptr() as *const u8),
+                    windows::core::PCSTR(c"shutdown.exe".as_ptr() as *const u8),
+                    windows::core::PCSTR(c"/s /t 0".as_ptr() as *const u8),
+                    windows::core::PCSTR::null(),
+                    SW_HIDE,
+                );
+            }
+            "task_manager" => {
+                let _ = ShellExecuteA(
+                    None,
+                    windows::core::PCSTR(c"open".as_ptr() as *const u8),
+                    windows::core::PCSTR(c"taskmgr.exe".as_ptr() as *const u8),
+                    windows::core::PCSTR::null(),
+                    windows::core::PCSTR::null(),
+                    SW_SHOWNORMAL,
+                );
+            }
+            "recycle_bin" => {
+                let _ = ShellExecuteA(
+                    None,
+                    windows::core::PCSTR(c"open".as_ptr() as *const u8),
+                    windows::core::PCSTR(c"powershell.exe".as_ptr() as *const u8),
+                    windows::core::PCSTR(c"-Command Clear-RecycleBin -Force -ErrorAction SilentlyContinue".as_ptr() as *const u8),
+                    windows::core::PCSTR::null(),
+                    SW_HIDE,
+                );
+            }
+            "terminal" => {
+                let _ = ShellExecuteA(
+                    None,
+                    windows::core::PCSTR(c"open".as_ptr() as *const u8),
+                    windows::core::PCSTR(c"wt.exe".as_ptr() as *const u8),
+                    windows::core::PCSTR::null(),
+                    windows::core::PCSTR::null(),
+                    SW_SHOWNORMAL,
+                );
+            }
+            "settings" => {
+                let _ = ShellExecuteA(
+                    None,
+                    windows::core::PCSTR(c"open".as_ptr() as *const u8),
+                    windows::core::PCSTR(c"ms-settings:".as_ptr() as *const u8),
+                    windows::core::PCSTR::null(),
+                    windows::core::PCSTR::null(),
+                    SW_SHOWNORMAL,
+                );
+            }
+            _ => return Err("Unknown command".to_string()),
+        }
     }
     Ok(())
 }

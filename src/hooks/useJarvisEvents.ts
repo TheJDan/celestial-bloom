@@ -15,7 +15,7 @@ export interface JarvisApprovalData {
 export interface JarvisEvent {
   type: string;
   session_id: string;
-  state: "started" | "listening" | "thinking" | "action_started" | "needs_approval" | "completed" | "error" | "idle";
+  state: "started" | "listening" | "thinking" | "action_started" | "needs_approval" | "completed" | "error" | "idle" | "approval_resolved";
   label: string;
   timestamp: number;
   data?: Record<string, any>;
@@ -56,15 +56,17 @@ export function useJarvisEvents() {
 
             if (ev.state === "needs_approval" && ev.data) {
               setApproval({
-                action_id: ev.data.action_id || "",
+                action_id: ev.data.action_id || ev.data.approval_id || "",
                 title: ev.data.title || "Confirmación requerida",
                 command: ev.data.command || "",
                 risk_level: ev.data.risk_level || "medium",
                 timeout_seconds: ev.data.timeout_seconds || 15
               });
-            } else if (ev.state === "completed" || ev.state === "error" || ev.state === "idle") {
+            } else if (ev.state === "completed" || ev.state === "error" || ev.state === "idle" || ev.state === "approval_resolved") {
               setApproval(null);
             }
+          } else if (msg.type === "approval_result") {
+            setApproval(null);
           } else if (msg.type === "state") {
             const st = (msg.value || "").toLowerCase();
             setState(st);
@@ -110,7 +112,7 @@ export function useJarvisEvents() {
       await fetch("http://127.0.0.1:8765/api/approve", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action_id: actionId, approved })
+        body: JSON.stringify({ action_id: actionId, approval_id: actionId, approved, client_id: "bloom_island" })
       });
       setApproval(null);
     } catch (e) {

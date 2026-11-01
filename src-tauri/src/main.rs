@@ -12,6 +12,12 @@ mod types;
 mod updater;
 mod utils;
 mod wifi;
+mod hardware;
+mod optimizer;
+mod jack;
+mod usb;
+mod window_region;
+mod razer;
 
 use std::sync::atomic::Ordering;
 use tauri::Manager;
@@ -34,6 +40,10 @@ unsafe extern "system" fn ctrl_handler(ctrl_type: u32) -> BOOL {
 }
 
 fn main() {
+    std::panic::set_hook(Box::new(|info| {
+        log_boot(&format!("PANIC: {}", info));
+    }));
+    log_boot("main() entered");
     let mut args = std::env::args_os();
     if args.nth(1).as_deref() == Some(std::ffi::OsStr::new("--taskbar-watchdog")) {
         if let (Some(pid), Some(marker)) = (args.next(), args.next()) {
@@ -71,7 +81,9 @@ fn main() {
         let h_mutex = CreateMutexW(None, true, windows::core::PCWSTR(mutex_name.as_ptr())).ok();
         let err = GetLastError();
 
+        log_boot(&format!("Single instance check err={}", err.0));
         if err.0 == 183 {
+            log_boot("Single instance check: already running (err=183). Exiting.");
             // Another instance is already running — signal it to open settings
             if let Ok(h_event) = OpenEventW(
                 SYNCHRONIZATION_ACCESS_RIGHTS(0x00100002),
@@ -112,12 +124,15 @@ fn main() {
             Some(vec![]),
         ))
         .invoke_handler(tauri::generate_handler![
+            end_task,
+            run_smart_boost,
             hide_native_osd,
             open_settings_window,
             open_wifi_settings,
             open_sound_settings,
             get_audio_output_devices,
             set_default_audio_device,
+            get_headset_battery,
             get_jarvis_status,
             jarvis_toggle_mute,
             jarvis_send_prompt,
@@ -230,10 +245,15 @@ fn main() {
             close_quick_look,
             close_spotlight,
             close_expose,
-            execute_system_command
+            execute_system_command,
+            window_region::set_window_region,
+            usb::usb_list_devices,
+            jack::jack_list_devices
         ])
         .setup(|app| {
+            log_boot("setup() step 1: entered");
             init_taskbar_marker(app.handle());
+            log_boot("setup() step 2: taskbar marker init");
             // Populate the settings cache before anything else: a webview can
             // invoke save_setting as soon as it loads, which happens before the
             // rest of this hook runs.
@@ -256,8 +276,22 @@ fn main() {
                 });
             }
 
-            let window = app.get_webview_window("main").unwrap();
-            let dock_win = app.get_webview_window("dock").unwrap();
+            log_boot("setup() step 3: getting windows");
+            let window = match app.get_webview_window("main") {
+                Some(w) => w,
+                None => {
+                    log_boot("ERROR: main window not found in setup");
+                    return Err("main window not found".into());
+                }
+            };
+            let dock_win = match app.get_webview_window("dock") {
+                Some(w) => w,
+                None => {
+                    log_boot("ERROR: dock window not found in setup");
+                    return Err("dock window not found".into());
+                }
+            };
+            log_boot("setup() step 4: windows retrieved");
 
             // Sync window rects initially and on event
             let win_clone = window.clone();
@@ -377,8 +411,19 @@ fn main() {
             setup_audio_visualization(app.handle().clone());
             setup_settings_watcher(app.handle().clone());
             wifi::setup_wifi_notifications(app.handle().clone());
+            log_boot("setup() step 5: setting up services");
             bluetooth::setup_bluetooth_notifications(app.handle().clone());
+            usb::setup_usb_notifications(app.handle().clone());
+            jack::setup_jack_notifications(app.handle().clone());
             services::setup_memory_trim_worker();
+            hardware::setup_hardware_telemetry(app.handle().clone());
+            log_boot("setup() step 6: services setup completed");
+
+            let handle_for_crash_clear = app.handle().clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_secs(10));
+                crate::utils::clear_crash_restart_counter(&handle_for_crash_clear);
+            });
 
             // Ensure main (notch) and dock windows are initialized and visible
             // promptly even if frontend splash or event handshakes are delayed.
@@ -501,13 +546,39 @@ fn main() {
                         }
                     })
                     .build(app)?;
+                log_boot("tray icon built successfully");
             }
+            log_boot("setup() completed successfully");
             Ok(())
         })
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
+    log_boot("entering app.run()");
     app.run(|_, event| {
-        if let tauri::RunEvent::Exit = event {
+        match &event {
+            tauri::RunEvent::ExitRequested { code, .. } => {
+                log_boot(&format!("app.run: ExitRequested code={:?}", code));
+            }
+            tauri::RunEvent::Exit => {
+                log_boot("app.run: Exit");
+                set_taskbar_visibility(true, true);
+                NATIVE_TASKBAR_HIDDEN.store(false, Ordering::Relaxed);
+                set_native_osd_suppressed(false);
+            }
+            tauri::RunEvent::WindowEvent { label, event: we, .. } => {
+                match we {
+                    tauri::WindowEvent::Destroyed => {
+                        log_boot(&format!("Window '{}' Destroyed", label));
+                    }
+                    tauri::WindowEvent::CloseRequested { .. } => {
+                        log_boot(&format!("Window '{}' CloseRequested", label));
+                    }
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+        if false {
             set_taskbar_visibility(true, true);
             NATIVE_TASKBAR_HIDDEN.store(false, Ordering::Relaxed);
             set_native_osd_suppressed(false);

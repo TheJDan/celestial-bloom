@@ -25,6 +25,7 @@ import {
 	MemoryStick,
 	HardDrive,
 	ArrowUpDown,
+	Headphones,
 	X,
 	ArrowLeftRight,
 	ChevronUp,
@@ -50,7 +51,8 @@ const WIDGET_DEFS: WidgetDef[] = [
 	{ id: "cpu", label: "CPU", icon: Cpu, color: "#f97316" },
 	{ id: "ram", label: "RAM", icon: MemoryStick, color: "#a78bfa" },
 	{ id: "disk", label: "Disk", icon: HardDrive, color: "#38bdf8" },
-	{ id: "net", label: "Net", icon: ArrowUpDown, color: "#2dd4bf" }
+	{ id: "net", label: "Net", icon: ArrowUpDown, color: "#2dd4bf" },
+	{ id: "audio", label: "Audio", icon: Headphones, color: "#00e700" }
 ];
 
 const DEFAULT_CONFIG: WidgetConfig = {

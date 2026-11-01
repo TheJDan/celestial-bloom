@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { ChevronLeft, RefreshCw, LoaderCircle, Layers } from "lucide-react";
+import { ChevronLeft, RefreshCw, LoaderCircle, Layers, MoreHorizontal, X } from "lucide-react";
 import "./QuickPanel.css";
 
 interface TrayApp {
@@ -12,13 +12,28 @@ interface TrayApp {
 
 interface SystemTrayPanelProps {
 	onBack: () => void;
+	onPinChange?: (pinned: boolean) => void;
 }
 
-export function SystemTrayPanel({ onBack }: SystemTrayPanelProps) {
+export function SystemTrayPanel({ onBack, onPinChange }: SystemTrayPanelProps) {
 	const [apps, setApps] = useState<TrayApp[] | null>(null);
 	const [icons, setIcons] = useState<Record<string, string>>({});
 	const [refreshing, setRefreshing] = useState(false);
 	const [busyId, setBusyId] = useState<string | null>(null);
+	const [closingPaths, setClosingPaths] = useState<Set<string>>(new Set());
+
+	// Pin the notch while this panel is open so tray interactions or focus shifts don't collapse Bloom
+	useEffect(() => {
+		onPinChange?.(true);
+		return () => {
+			onPinChange?.(false);
+		};
+	}, [onPinChange]);
+
+	const handleBack = useCallback(() => {
+		onPinChange?.(false);
+		onBack();
+	}, [onBack, onPinChange]);
 
 	const fetchTrayApps = useCallback(async () => {
 		try {
@@ -54,6 +69,15 @@ export function SystemTrayPanel({ onBack }: SystemTrayPanelProps) {
 	}, [fetchTrayApps]);
 
 	const handleAppClick = useCallback(async (app: TrayApp) => {
+		// If the app has an existing window, focus it first
+		if (app.window_handles && app.window_handles.length > 0) {
+			try {
+				await invoke("focus_window", { hwnd: app.window_handles[0] });
+				return;
+			} catch (e) {
+				console.warn("Failed to focus window, trying tray activation:", e);
+			}
+		}
 		if (app.tray_ids.length === 0) return;
 		setBusyId(app.tray_ids[0]);
 		try {
@@ -76,10 +100,34 @@ export function SystemTrayPanel({ onBack }: SystemTrayPanelProps) {
 		}
 	}, []);
 
+	const handleEndTask = useCallback(async (e: React.MouseEvent, app: TrayApp) => {
+		e.preventDefault();
+		e.stopPropagation();
+		setClosingPaths((prev) => new Set(prev).add(app.path));
+		try {
+			await invoke("end_task", {
+				hwnd: app.window_handles[0] ?? null,
+				path: app.path
+			});
+			// Optimistically remove from state
+			setApps((prev) => (prev ? prev.filter((a) => a.path !== app.path) : []));
+		} catch (err) {
+			console.error("Failed to end task:", err);
+			// Refresh list in case process couldn't be closed
+			void fetchTrayApps();
+		} finally {
+			setClosingPaths((prev) => {
+				const next = new Set(prev);
+				next.delete(app.path);
+				return next;
+			});
+		}
+	}, [fetchTrayApps]);
+
 	return (
 		<div className="qp" onClick={(e) => e.stopPropagation()}>
 			<div className="qp-header">
-				<button className="qp-icon-btn" onClick={onBack} aria-label="Volver">
+				<button className="qp-icon-btn" onClick={handleBack} aria-label="Volver">
 					<ChevronLeft />
 				</button>
 				<span className="qp-title">System Tray</span>
@@ -105,13 +153,15 @@ export function SystemTrayPanel({ onBack }: SystemTrayPanelProps) {
 						{apps.map((app) => {
 							const iconSrc = icons[app.path];
 							const isBusy = app.tray_ids[0] && busyId === app.tray_ids[0];
+							const isClosing = closingPaths.has(app.path);
 							return (
-								<li key={app.path} className="qp-row">
+								<li key={app.path} className="qp-row qp-row-tray">
 									<button
+										type="button"
 										className="qp-row-main"
 										onClick={() => handleAppClick(app)}
 										onContextMenu={(e) => handleContextMenu(e, app)}
-										title="Clic izquierdo para abrir, clic derecho para menú de opciones"
+										title="Clic para abrir/enfocar • Clic derecho para menú"
 									>
 										<span className="qp-row-icon" style={{ background: "transparent" }}>
 											{iconSrc ? (
@@ -128,10 +178,37 @@ export function SystemTrayPanel({ onBack }: SystemTrayPanelProps) {
 										<span className="qp-row-text">
 											<span className="qp-row-name">{app.name}</span>
 											<span className="qp-row-sub">
-												{isBusy ? "Activando…" : "Clic: abrir • Clic derecho: menú"}
+												{isClosing
+													? "Cerrando proceso…"
+													: isBusy
+													? "Activando…"
+													: "En segundo plano"}
 											</span>
 										</span>
 									</button>
+									<div className="qp-row-side-actions">
+										{app.tray_ids.length > 0 && (
+											<button
+												type="button"
+												className="qp-action-btn"
+												onClick={(e) => handleContextMenu(e, app)}
+												title="Menú contextual"
+												aria-label="Menú contextual"
+											>
+												<MoreHorizontal size={13} />
+											</button>
+										)}
+										<button
+											type="button"
+											className="qp-action-btn qp-close-btn"
+											onClick={(e) => handleEndTask(e, app)}
+											disabled={isClosing}
+											title="Cerrar / Finalizar tarea"
+											aria-label="Cerrar / Finalizar tarea"
+										>
+											{isClosing ? <LoaderCircle className="qp-spin" size={13} /> : <X size={13} />}
+										</button>
+									</div>
 								</li>
 							);
 						})}

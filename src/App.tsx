@@ -18,6 +18,102 @@ import {
 	HeadphonesIcon
 } from "./icons";
 import { CompactMediaPlayer } from "./CompactMediaPlayer";
+import { DeviceArt, DeviceArtDefs } from "./devices/DeviceArt";
+import { usbArtFor, usbDisplayName, type UsbIdentity } from "./devices/usbArtFor";
+import type { DeviceArtKey } from "./devices/art";
+
+interface UsbConnection extends UsbIdentity {
+	id: string;
+	connected: boolean;
+}
+
+interface DeviceAlert {
+	id: string;
+	art: DeviceArtKey;
+	name: string;
+	connected: boolean;
+	battery: number | null;
+	usb?: boolean;
+	runId: number;
+}
+
+function deviceAlertStatus(art: DeviceArtKey, connected: boolean, wired = false): string {
+	if (art === "sd-card") return connected ? "Insertada" : "Expulsada";
+	if (wired) return connected ? "Conectado" : "Desconectado";
+	return connected ? "Conectado" : "Desconectado";
+}
+
+/** Anillo circular indicador de batería con porcentaje interior */
+function DeviceBatteryRing({ level, charging = false }: { level: number; charging?: boolean }) {
+	const r = 10.5;
+	const circumference = 2 * Math.PI * r;
+	const low = level <= 20 && !charging;
+	return (
+		<div
+			className={`device-alert-battery${low ? " low" : ""}${charging ? " charging" : ""}`}
+			title={`${level}%${charging ? ", cargando" : ""}`}
+		>
+			<svg viewBox="0 0 28 28" width="28" height="28">
+				<circle cx="14" cy="14" r={r} className="track" />
+				<circle
+					cx="14"
+					cy="14"
+					r={r}
+					className="level"
+					strokeDasharray={`${(circumference * level) / 100} ${circumference}`}
+					transform="rotate(-90 14 14)"
+				/>
+			</svg>
+			<span>{level}</span>
+		</div>
+	);
+}
+
+interface ActiveHeadphonesInfo {
+	id: string;
+	name: string;
+	shortName: string;
+	battery: number | null;
+}
+
+function detectHeadphones(name: string): { isHeadphones: boolean; shortName: string } {
+	const lower = name.toLowerCase();
+	const isHeadphones =
+		lower.includes("headphone") ||
+		lower.includes("auricular") ||
+		lower.includes("headset") ||
+		lower.includes("earphone") ||
+		lower.includes("airpods") ||
+		lower.includes("buds") ||
+		lower.includes("razer") ||
+		lower.includes("thx") ||
+		lower.includes("steelseries") ||
+		lower.includes("hyperx") ||
+		lower.includes("logitech") ||
+		lower.includes("corsair") ||
+		lower.includes("audio usb") ||
+		lower.includes("usb audio") ||
+		lower.includes("jack");
+
+	if (!isHeadphones) {
+		return { isHeadphones: false, shortName: "" };
+	}
+
+	let shortName = "Razer";
+	if (lower.includes("razer")) shortName = "Razer";
+	else if (lower.includes("thx")) shortName = "Razer THX";
+	else if (lower.includes("airpods")) shortName = "AirPods";
+	else if (lower.includes("buds")) shortName = "Buds";
+	else if (lower.includes("hyperx")) shortName = "HyperX";
+	else if (lower.includes("steelseries")) shortName = "Arctis";
+	else if (lower.includes("logitech")) shortName = "Logitech";
+	else if (lower.includes("corsair")) shortName = "Corsair";
+	else if (lower.includes("usb")) shortName = "Razer USB";
+	else shortName = "Audífonos";
+
+	return { isHeadphones: true, shortName };
+}
+import { useLyrics } from "./hooks/useLyrics";
 import { useWeather } from "./hooks/useWeather";
 import { useSettingsSync } from "./hooks/useSettingsSync";
 import { useTrailingThrottle } from "./hooks/useTrailingThrottle";
@@ -50,7 +146,10 @@ import {
 	ChevronRight,
 	Inbox,
 	Music,
-	Bot
+	Bot,
+	Zap,
+	CheckCircle,
+	ShieldCheck
 } from "lucide-react";
 
 /**
@@ -63,8 +162,21 @@ import {
  *   Dragging files onto the notch also opens the shelf. Wheel/swipe switches
  *   between tool panels, including when a live activity occupies the pill.
  */
-type NotchPanel = "calendar" | "command-center";
-const NOTCH_PANELS: readonly NotchPanel[] = ["calendar", "command-center"];
+type NotchPanel = "calendar" | "command-center" | "optimizer";
+const NOTCH_PANELS: readonly NotchPanel[] = ["calendar", "command-center", "optimizer"];
+
+interface HardwareStats {
+	cpu_name: string;
+	cpu_percent: number;
+	ram_used_gb: number;
+	ram_total_gb: number;
+	ram_percent: number;
+	gpu_name: string;
+	gpu_percent: number;
+	gpu_temp: number;
+	vram_used_gb: number;
+	vram_total_gb: number;
+}
 const asNotchPanel = (value: unknown): NotchPanel | null =>
 	NOTCH_PANELS.includes(value as NotchPanel) ? (value as NotchPanel) : null;
 
@@ -430,13 +542,15 @@ type BloomMode =
 	| "music"
 	| "calendar"
 	| "command-center"
+	| "optimizer"
 	| "announcement"
 	| "status"
 	| "shelf"
 	| "wifi"
 	| "bluetooth"
 	| "system-tray"
-	| "audio-output";
+	| "audio-output"
+	| "device";
 
 interface JarvisStatus {
 	online: boolean;
@@ -501,7 +615,41 @@ const TitleMarquee = ({ title }: { title: string }) => {
 	);
 };
 
+interface SmartBoostResult {
+	freed_mb: number;
+	processes_optimized: number;
+	ram_used_gb: number;
+	ram_total_gb: number;
+	ram_percent: number;
+}
+
 function App() {
+	const [isOptimizing, setIsOptimizing] = useState(false);
+	const [boostResult, setBoostResult] = useState<SmartBoostResult | null>(null);
+
+	const handleSmartBoost = async () => {
+		if (isOptimizing) return;
+		setIsOptimizing(true);
+		try {
+			const res = await invoke<SmartBoostResult>("run_smart_boost");
+			setBoostResult(res);
+			setHardwareStats((prev) =>
+				prev
+					? {
+							...prev,
+							ram_used_gb: res.ram_used_gb,
+							ram_total_gb: res.ram_total_gb,
+							ram_percent: res.ram_percent
+						}
+					: prev
+			);
+		} catch (e) {
+			console.error("Smart boost error:", e);
+		} finally {
+			setIsOptimizing(false);
+		}
+	};
+
 	useEffect(() => {
 		return initTheme();
 	}, []);
@@ -516,6 +664,51 @@ function App() {
 	const [scale, setScale] = useState(() =>
 		parseFloat(localStorage.getItem("bloom-notch-scale") || localStorage.getItem("bloom-scale") || "1.0")
 	);
+	const [hardwareStats, setHardwareStats] = useState<HardwareStats | null>(null);
+
+	const [activeHeadphones, setActiveHeadphones] = useState<ActiveHeadphonesInfo | null>(null);
+
+	const checkAudioDevice = useCallback(async () => {
+		try {
+			const devices = await invoke<{ id: string; name: string; is_default: boolean }[]>(
+				"get_audio_output_devices"
+			);
+			const defaultDevice = devices.find((d) => d.is_default);
+			if (defaultDevice) {
+				const { isHeadphones, shortName } = detectHeadphones(defaultDevice.name);
+				if (isHeadphones) {
+					let battery: number | null = null;
+					try {
+						battery = await invoke<number | null>("get_headset_battery");
+					} catch (_) {}
+					setActiveHeadphones({
+						id: defaultDevice.id,
+						name: defaultDevice.name,
+						shortName,
+						battery
+					});
+					return;
+				}
+			}
+			setActiveHeadphones(null);
+		} catch (_) {}
+	}, []);
+
+	useEffect(() => {
+		checkAudioDevice();
+		const interval = setInterval(checkAudioDevice, 2500);
+		return () => clearInterval(interval);
+	}, [checkAudioDevice]);
+
+	useEffect(() => {
+		const unlisten = listen<HardwareStats>("hardware-stats", (event) => {
+			setHardwareStats(event.payload);
+		});
+		return () => {
+			unlisten.then((fn) => fn());
+		};
+	}, []);
+
 	const [timeFormat24h, setTimeFormat24h] = useState(
 		() => localStorage.getItem("bloom-time-format-24h") === "true"
 	);
@@ -625,6 +818,38 @@ function App() {
 	});
 	const [albumArtUrl, setAlbumArtUrl] = useState<string | null>(null);
 	const [albumArtKey, setAlbumArtKey] = useState(0);
+
+	// Live extrapolated playback position for real-time island lyric sync
+	const [livePositionMs, setLivePositionMs] = useState(0);
+	useEffect(() => {
+		const pos = mediaInfo.position_ms ?? 0;
+		const updated = mediaInfo.position_updated_at || Date.now();
+		let lastPos = pos;
+		setLivePositionMs(pos);
+		const interval = setInterval(() => {
+			if (isPlaying) {
+				const elapsed = Date.now() - updated;
+				lastPos = Math.min(pos + elapsed, mediaInfo.duration_ms || Infinity);
+				setLivePositionMs(lastPos);
+			} else {
+				setLivePositionMs(pos);
+			}
+		}, 250);
+		return () => clearInterval(interval);
+	}, [mediaInfo.position_ms, mediaInfo.position_updated_at, mediaInfo.duration_ms, isPlaying]);
+
+	// Synchronized live lyrics from LRCLIB for the island
+	const { currentLine: islandLyricLine } = useLyrics(
+		mediaInfo.title,
+		mediaInfo.artist,
+		livePositionMs,
+		isPlaying,
+		mediaInfo.duration_ms
+	);
+	const [lyricsExpanded, setLyricsExpanded] = useState(() => {
+		return localStorage.getItem("bloom-lyrics-expanded") === "true";
+	});
+
 	const [volume, setVolume] = useState(0.5);
 	const [isMuted, setIsMuted] = useState(false);
 	// Sliders show 0 while muted, matching the overlay HUD.
@@ -1453,6 +1678,67 @@ function App() {
 	const notchPinnedRef = useRef(false);
 	const releaseDeferredRef = useRef(false);
 
+	const [deviceAlert, setDeviceAlert] = useState<DeviceAlert | null>(null);
+	const deviceAlertRef = useRef<DeviceAlert | null>(null);
+	deviceAlertRef.current = deviceAlert;
+	const deviceAlertTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+	const deviceAlertQueueRef = useRef<Omit<DeviceAlert, "runId">[]>([]);
+	const presentDeviceAlertRef = useRef<(alert: Omit<DeviceAlert, "runId">) => void>(() => {});
+
+	presentDeviceAlertRef.current = (alert) => {
+		const duration = alert.connected ? 3200 : 2500;
+		setDeviceAlert({ ...alert, runId: Date.now() });
+		setBloomMode("device");
+		if (deviceAlertTimerRef.current) clearTimeout(deviceAlertTimerRef.current);
+		deviceAlertTimerRef.current = setTimeout(() => {
+			const next = deviceAlertQueueRef.current.shift();
+			if (next && !isOpenRef.current) presentDeviceAlertRef.current(next);
+			else {
+				deviceAlertQueueRef.current = [];
+				setDeviceAlert(null);
+			}
+		}, duration);
+	};
+
+	const showDeviceAlert = useCallback((alert: Omit<DeviceAlert, "runId">) => {
+		const mode = bloomModeRef.current;
+		if (isOpenRef.current || mode === "announcement" || mode === "shelf") return;
+		const current = deviceAlertRef.current;
+		if (current && current.id !== alert.id) {
+			const queue = deviceAlertQueueRef.current.filter((queued) => queued.id !== alert.id);
+			deviceAlertQueueRef.current = [...queue, alert].slice(-3);
+			return;
+		}
+		presentDeviceAlertRef.current(alert);
+	}, []);
+
+	useEffect(() => {
+		const showWired = ({ payload }: { payload: UsbConnection }) => {
+			const name = usbDisplayName(payload);
+			showDeviceAlert({
+				id: payload.id,
+				art: usbArtFor(payload),
+				name,
+				connected: payload.connected,
+				battery: null,
+				usb: true
+			});
+		};
+		const unlistenUsb = listen<UsbConnection>("usb-connection", showWired);
+		const unlistenJack = listen<UsbConnection>("wired-audio-connection", showWired);
+		return () => {
+			unlistenUsb.then((f) => f());
+			unlistenJack.then((f) => f());
+			if (deviceAlertTimerRef.current) clearTimeout(deviceAlertTimerRef.current);
+		};
+	}, [showDeviceAlert]);
+
+	useEffect(() => {
+		if (bloomMode === "device" && !deviceAlert) {
+			setBloomMode(isOpenRef.current ? openingPanel() : restingModeRef.current);
+		}
+	}, [bloomMode, deviceAlert]);
+
 	// Shared hover-release, called on DOM hover end and when the backend
 	// reports the pointer left the (now click-through) notch window. Closes an
 	// open notch, remembering its panel, and returns to the resting mode.
@@ -1474,12 +1760,14 @@ function App() {
 			prev === "music" ||
 			prev === "command-center" ||
 			prev === "calendar" ||
+			prev === "optimizer" ||
 			prev === "status" ||
 			prev === "shelf" ||
 			prev === "wifi" ||
 			prev === "bluetooth" ||
 			prev === "system-tray" ||
-			prev === "audio-output"
+			prev === "audio-output" ||
+			prev === "device"
 				? restingModeRef.current
 				: prev
 		);
@@ -1721,6 +2009,14 @@ function App() {
 			return;
 		}
 
+		// Instant volume control via mouse wheel gesture when island is collapsed
+		if (!isOpen) {
+			const step = e.deltaY < 0 ? 0.03 : -0.03;
+			const newVol = Math.max(0, Math.min(1, Math.round((volume + step) * 100) / 100));
+			handleVolumeChange(newVol);
+			return;
+		}
+
 		const now = Date.now();
 		if (now - lastScrollTime.current < 250) return;
 
@@ -1946,7 +2242,7 @@ function App() {
 	const showShelfBubble =
 		shelfItems.length > 0 && !isOpen && isVisible && !isHidden && bloomMode !== "announcement";
 	const showJarvisBubble =
-		jarvisActive && !isOpen && isVisible && !isHidden && bloomMode !== "announcement";
+		jarvisActive && !isOpen && isVisible && !isHidden && bloomMode !== "announcement" && (localStorage.getItem("bloom-jarvis-enabled") !== "false");
 	restingModeRef.current = collapsedMode;
 	bloomModeRef.current = bloomMode;
 
@@ -1958,11 +2254,39 @@ function App() {
 	};
 
 	// Expands the notch into a panel, or into an activity's own view.
-	const openNotch = (view: NotchPanel | "music" | "shelf") => {
+	const openNotch = (view: NotchPanel | "music" | "shelf" | "audio-output") => {
 		if (bloomMode === "announcement") return;
 		setIsOpen(true);
 		setBloomMode(view);
 	};
+
+	useEffect(() => {
+		if (!isOpen) return;
+		const handleGlobalPointerDown = (e: MouseEvent) => {
+			if (bloomRef.current && !bloomRef.current.contains(e.target as Node)) {
+				releaseNotchHover();
+			}
+		};
+		window.addEventListener("pointerdown", handleGlobalPointerDown, true);
+		return () => {
+			window.removeEventListener("pointerdown", handleGlobalPointerDown, true);
+		};
+	}, [isOpen]);
+
+	useEffect(() => {
+		if (windowLabel !== "main") return;
+		const unlisten = listen("reveal-notch", () => {
+			setIsVisible(true);
+			triggerEventPeek(8000);
+			setNotchMode("fixed");
+			localStorage.setItem("bloom-notch-mode", "fixed");
+			invoke("change_notch_mode", { mode: "fixed" }).catch(() => {});
+			openNotch("command-center");
+		});
+		return () => {
+			unlisten.then((f) => f());
+		};
+	}, [windowLabel, triggerEventPeek]);
 
 	const rememberPanel = (panel: NotchPanel) => {
 		if (panel === lastPanel) return;
@@ -2519,6 +2843,31 @@ function App() {
 						</span>
 					</div>
 				);
+			case "audio":
+			case "headphones":
+			case "razer":
+				return (
+					<div
+						className="passive-feature"
+						key="audio"
+						title={`Salida de audio: ${activeHeadphones ? activeHeadphones.name : "Altavoces"}`}
+						style={{ cursor: "pointer" }}
+						onClick={(e) => {
+							e.stopPropagation();
+							openNotch("audio-output");
+						}}
+					>
+						<HeadphonesIcon
+							size={12}
+							style={{ color: activeHeadphones ? "#00e700" : "inherit" }}
+						/>
+						<span className="label">
+							{activeHeadphones?.battery !== null && activeHeadphones?.battery !== undefined
+								? `${activeHeadphones.battery}%`
+								: ""}
+						</span>
+					</div>
+				);
 			default:
 				return null;
 		}
@@ -2545,8 +2894,10 @@ function App() {
 	// Calculate width dynamically based on enabled features
 	const getDynamicWidth = () => {
 		if (bloomMode === "announcement" && announcement && !announcementDismissed) return 380;
+		if (bloomMode === "device" && deviceAlert) return 330;
 		if (isCalendarMode) return 480;
 		if (bloomMode === "shelf") return 380;
+		if (bloomMode === "optimizer" && isOpen) return 370;
 		if (bloomMode === "command-center" && isOpen) return 350;
 		if (bloomMode === "wifi" || bloomMode === "bluetooth" || bloomMode === "system-tray" || bloomMode === "audio-output") return 360;
 		if (showMusicOnStatusHover) {
@@ -2556,13 +2907,16 @@ function App() {
 			const totalWidgets = statusWidgets.left.length + statusWidgets.right.length;
 			return Math.min(200 + totalWidgets * 50, 380) - clock24hTrim;
 		}
-		if (isMusicMode && isOpen) return mediaLayout === "compact" ? 300 : 340;
+		if (isMusicMode && isOpen) {
+			if (lyricsExpanded) return 440;
+			return mediaLayout === "compact" ? 300 : 340;
+		}
 		if ((showPowerPulse || showLowBatteryPulse || showUpdatePulse) && !isHovered) return 200;
 
 		let w = 168 - clock24hTrim;
 		if (isMusicMode) {
-			if (settingsVisualizerEnabled && isPlaying) w += 30;
-			if (settingsAlbumArtEnabled) w += 30;
+			if (settingsVisualizerEnabled && isPlaying) w += 32;
+			if (settingsAlbumArtEnabled) w += 32;
 		}
 
 		return w;
@@ -2572,6 +2926,7 @@ function App() {
 		if (!isExpanded || !isVisible || isHidden) {
 			return isImpacted ? 28.9 : 44.2;
 		}
+		if (bloomMode === "device" && deviceAlert) return 72;
 		// Announcement card: body is line-clamped, so a fixed size fits both cases.
 		if (bloomMode === "announcement" && announcement && !announcementDismissed) {
 			return announcement.url ? 168 : 148;
@@ -2585,6 +2940,7 @@ function App() {
 			if (shelfItems.length === 0) return 130;
 			return shelfOverflowing ? 190 : 176;
 		}
+		if (bloomMode === "optimizer") return isOpen ? 220 : 36;
 		if (bloomMode === "command-center") return isOpen ? 230 : 36;
 		if (bloomMode === "wifi" || bloomMode === "bluetooth") return 300;
 		if (bloomMode === "system-tray") return 340;
@@ -2595,6 +2951,7 @@ function App() {
 			let h = mediaLayout === "compact" ? (hasProgressBar ? 132 : 116) : 120;
 			if (mediaLayout === "compact") {
 				if (compactVolumeExpanded) h += 36;
+				if (lyricsExpanded) h += 270;
 			}
 			return h;
 		}
@@ -2616,6 +2973,7 @@ function App() {
 
 	return (
 		<div className="screen" style={{ overflow: "hidden" }}>
+			<DeviceArtDefs />
 			{/* Screen Corners (Top) */}
 			<AnimatePresence>
 				{isVisible && settingsCornersEnabled && (
@@ -2685,7 +3043,11 @@ function App() {
 					}}
 					onClick={(e) => {
 						e.stopPropagation();
-						if (!isOpen) openNotch(openingPanel());
+						if (isOpen) {
+							releaseNotchHover();
+						} else {
+							openNotch(openingPanel());
+						}
 					}}
 					onHoverStart={() => {
 						releaseDeferredRef.current = false;
@@ -2748,7 +3110,8 @@ function App() {
 									flexDirection: "column",
 									alignItems: "center",
 									position: "relative",
-									borderRadius: "inherit"
+									borderRadius: "inherit",
+									overflow: "hidden"
 								}}
 							>
 								{/* Faster Waiting Transition Area */}
@@ -2771,6 +3134,11 @@ function App() {
 													volume={displayVolume}
 													volumeExpanded={compactVolumeExpanded}
 													onVolumeExpandedChange={setCompactVolumeExpanded}
+													lyricsExpanded={lyricsExpanded}
+													onLyricsExpandedChange={(expanded) => {
+														setLyricsExpanded(expanded);
+														localStorage.setItem("bloom-lyrics-expanded", String(expanded));
+													}}
 													onTogglePlayPause={togglePlayPause}
 													onVolumeChange={handleVolumeChange}
 													prevFront={prevFront}
@@ -2849,7 +3217,12 @@ function App() {
 														<div className="track-header-row">
 															<div className="track-info-middle">
 																<TitleMarquee title={mediaInfo.title} />
-																<span className="premium-artist">{mediaInfo.artist}</span>
+																<span
+																	className={`premium-artist ${islandLyricLine ? "premium-artist-lyric" : ""}`}
+																	title="Letra en tiempo real (LRCLIB)"
+																>
+																	{islandLyricLine ? `♪ ${islandLyricLine}` : mediaInfo.artist}
+																</span>
 															</div>
 															<div className="header-visualizer-wrap">
 																<div className="header-visualizer">
@@ -3075,9 +3448,9 @@ function App() {
 															animate={{ opacity: 1 }}
 															exit={{ opacity: 0 }}
 														>
-															{/* Left: music on hover while a paused session remains, otherwise status widgets */}
+															{/* Left: music on hover while a paused session remains, otherwise status widgets or headphones badge */}
 															<div className="side-content left">
-																{showCompactMusicIcons && settingsVisualizerEnabled ? (
+																{showCompactMusicIcons && settingsVisualizerEnabled && (
 																	<AnimatePresence>
 																		{settingsVisualizerEnabled && (
 																			<motion.div
@@ -3090,7 +3463,9 @@ function App() {
 																			</motion.div>
 																		)}
 																	</AnimatePresence>
-																) : !showCompactMusicIcons && isHovered && statusWidgets.left.length > 0 ? (
+																)}
+
+																{!showCompactMusicIcons && isHovered && statusWidgets.left.length > 0 ? (
 																	<motion.div
 																		key="left-widgets"
 																		className="passive-features-group"
@@ -3253,7 +3628,7 @@ function App() {
 																			</button>
 																		</motion.div>
 																	</AnimatePresence>
-																) : !showCompactMusicIcons && isHovered && statusWidgets.right.length > 0 ? (
+																) : !showCompactMusicIcons && isHovered && (statusWidgets.right.length > 0 || activeHeadphones) ? (
 																	<motion.div
 																		key="right-widgets"
 																		className="passive-features-group"
@@ -3262,6 +3637,26 @@ function App() {
 																		exit={{ opacity: 0 }}
 																		transition={{ duration: 0.2 }}
 																	>
+																		{activeHeadphones && !statusWidgets.left.includes("audio") && !statusWidgets.right.includes("audio") && (
+																			<div
+																				className="passive-feature"
+																				key="active-headphones"
+																				title={`Salida de audio: ${activeHeadphones.name}\nHaz clic para cambiar dispositivo`}
+																				style={{ cursor: "pointer" }}
+																				onClick={(e) => {
+																					e.stopPropagation();
+																					openNotch("audio-output");
+																				}}
+																			>
+																				<HeadphonesIcon
+																					size={12}
+																					style={{ color: "#00e700" }}
+																				/>
+																				<span className="label">
+																					{activeHeadphones.battery !== null ? `${activeHeadphones.battery}%` : ""}
+																				</span>
+																			</div>
+																		)}
 																		{statusWidgets.right.map(renderStatusWidget)}
 																	</motion.div>
 																) : null}
@@ -3276,7 +3671,7 @@ function App() {
 
 								{/* Wi-Fi networks, opened from the controls panel's Wi-Fi tile */}
 								<AnimatePresence>
-									{bloomMode === "wifi" && (
+									{isOpen && bloomMode === "wifi" && (
 										<motion.div
 											key="wifi-view"
 											initial={{ opacity: 0 }}
@@ -3296,7 +3691,7 @@ function App() {
 
 								{/* Bluetooth devices, opened from the controls panel's Bluetooth tile */}
 								<AnimatePresence>
-									{bloomMode === "bluetooth" && (
+									{isOpen && bloomMode === "bluetooth" && (
 										<motion.div
 											key="bluetooth-view"
 											initial={{ opacity: 0 }}
@@ -3316,7 +3711,7 @@ function App() {
 
 								{/* System Tray Flyout */}
 								<AnimatePresence>
-									{bloomMode === "system-tray" && (
+									{isOpen && bloomMode === "system-tray" && (
 										<motion.div
 											key="system-tray-view"
 											initial={{ opacity: 0 }}
@@ -3324,14 +3719,14 @@ function App() {
 											exit={{ opacity: 0, filter: "blur(4px)", transition: { duration: 0.1 } }}
 											transition={{ type: "spring", stiffness: 400, damping: 30 }}
 										>
-											<SystemTrayPanel onBack={() => setBloomMode("command-center")} />
+											<SystemTrayPanel onBack={() => setBloomMode("command-center")} onPinChange={setNotchPinned} />
 										</motion.div>
 									)}
 								</AnimatePresence>
 
 								{/* Audio Output Switcher Flyout */}
 								<AnimatePresence>
-									{bloomMode === "audio-output" && (
+									{isOpen && bloomMode === "audio-output" && (
 										<motion.div
 											key="audio-output-view"
 											initial={{ opacity: 0 }}
@@ -3346,7 +3741,7 @@ function App() {
 
 								{/* Command Center Panel */}
 								<AnimatePresence>
-									{bloomMode === "command-center" && (
+									{isOpen && bloomMode === "command-center" && (
 										<motion.div
 											className="command-center-content-minimal"
 											onClick={(e) => e.stopPropagation()}
@@ -3512,6 +3907,29 @@ function App() {
 													className="cc-circular-btn"
 													onClick={(e) => {
 														e.stopPropagation();
+														setBloomMode("optimizer");
+													}}
+													title="Smart Boost (Optimizar RAM y Sistema)"
+												>
+													<Zap size={15} strokeWidth={2.2} />
+												</button>
+												<button
+													className="cc-circular-btn"
+													onClick={(e) => {
+														e.stopPropagation();
+														setBloomMode("shelf");
+													}}
+													title="Drop Shelf (Archivos y notas flotantes)"
+												>
+													<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2">
+														<path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.93a2 2 0 0 1-1.66-.9l-.82-1.2A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z" />
+														<path d="M12 10v6m-3-3 3 3 3-3" />
+													</svg>
+												</button>
+												<button
+													className="cc-circular-btn"
+													onClick={(e) => {
+														e.stopPropagation();
 														invoke("open_notification_center");
 													}}
 													title="Notification Center"
@@ -3629,6 +4047,106 @@ function App() {
 									)}
 								</AnimatePresence>
 
+								{/* Smart Boost / Optimizador del Sistema */}
+								<AnimatePresence>
+									{isOpen && bloomMode === "optimizer" && (
+										<motion.div
+											className="optimizer-container"
+											onClick={(e) => e.stopPropagation()}
+											initial={{ opacity: 0 }}
+											animate={{ opacity: 1 }}
+											exit={{ opacity: 0, filter: "blur(4px)", transition: { duration: 0.1 } }}
+											transition={{ type: "spring", stiffness: 400, damping: 30 }}
+										>
+											<div className="optimizer-header">
+												<div className="optimizer-title-row">
+													<span className="optimizer-badge">SMART BOOST</span>
+													<span className="optimizer-subtitle">
+														RAM: {hardwareStats ? `${hardwareStats.ram_used_gb} / ${hardwareStats.ram_total_gb} GB` : "32 GB"}
+													</span>
+												</div>
+												<div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+													<button
+														className="optimizer-close-btn"
+														onClick={(e) => {
+															e.stopPropagation();
+															setBloomMode("command-center");
+														}}
+														title="Volver a Centro de Control"
+													>
+														<ChevronRight style={{ transform: "rotate(180deg)" }} size={13} />
+													</button>
+													<button
+														className="optimizer-close-btn"
+														onClick={(e) => {
+															e.stopPropagation();
+															releaseNotchHover();
+														}}
+														title="Cerrar Isla"
+													>
+														<X size={13} strokeWidth={2.2} />
+													</button>
+												</div>
+											</div>
+
+											<div className="optimizer-body">
+												<div className="optimizer-gauge-card">
+													<div className="optimizer-gauge-top">
+														<span className="optimizer-card-label">Uso de Memoria</span>
+														<span className={`optimizer-card-val ${hardwareStats && hardwareStats.ram_percent > 80 ? "val-hot" : ""}`}>
+															{hardwareStats ? `${Math.round(hardwareStats.ram_percent)}%` : "—"}
+														</span>
+													</div>
+													<div className="optimizer-bar-track">
+														<div
+															className="optimizer-bar-fill"
+															style={{ width: `${Math.min(100, hardwareStats?.ram_percent ?? 0)}%` }}
+														/>
+													</div>
+													<div className="optimizer-gauge-meta">
+														<ShieldCheck size={12} className="meta-shield" />
+														<span>Protección activa: App en primer plano intacta</span>
+													</div>
+												</div>
+
+												<button
+													className={`optimizer-boost-btn ${isOptimizing ? "optimizing" : ""} ${boostResult ? "has-result" : ""}`}
+													onClick={handleSmartBoost}
+													disabled={isOptimizing}
+													title="Optimizar memoria de apps en reposo y purgar Standby List"
+												>
+													{isOptimizing ? (
+														<>
+															<RotateCcw size={14} className="spin-icon" strokeWidth={2.5} />
+															<span>Purgando procesos en reposo...</span>
+														</>
+													) : boostResult ? (
+														<>
+															<CheckCircle size={14} strokeWidth={2.5} style={{ color: "#34d399" }} />
+															<span>
+																{boostResult.freed_mb > 0
+																	? `¡${(boostResult.freed_mb / 1024).toFixed(1)} GB liberados!`
+																	: "¡Sistema optimizado!"}
+															</span>
+														</>
+													) : (
+														<>
+															<Zap size={14} strokeWidth={2.5} fill="currentColor" />
+															<span>Optimizar Todo el Sistema</span>
+														</>
+													)}
+												</button>
+
+												{boostResult && (
+													<div className="optimizer-result-note">
+														<span>✓ {boostResult.processes_optimized} apps podadas · Standby List purgada</span>
+													</div>
+												)}
+											</div>
+										</motion.div>
+									)}
+								</AnimatePresence>
+
 								{/* Announcement Card */}
 								<AnimatePresence>
 									{bloomMode === "announcement" && announcement && !announcementDismissed && (
@@ -3672,9 +4190,44 @@ function App() {
 									)}
 								</AnimatePresence>
 
+								{/* Device Alert (USB / 3.5mm Headset Connection) */}
+								<AnimatePresence>
+									{bloomMode === "device" && deviceAlert && (
+										<motion.div
+											key={`device-alert-${deviceAlert.id}-${deviceAlert.runId}`}
+											className="device-alert"
+											onClick={(e) => {
+												e.stopPropagation();
+												deviceAlertQueueRef.current = [];
+												setDeviceAlert(null);
+											}}
+											initial={{ opacity: 0 }}
+											animate={{ opacity: 1 }}
+											exit={{ opacity: 0, filter: "blur(4px)", transition: { duration: 0.12 } }}
+											transition={{ duration: 0.2 }}
+										>
+											<DeviceArt
+												art={deviceAlert.art}
+												phase={deviceAlert.connected ? "play" : "leave"}
+												runId={deviceAlert.runId}
+												size={56}
+											/>
+											<div className="device-alert-text">
+												<span className="device-alert-name">{deviceAlert.name}</span>
+												<span className="device-alert-status">
+													{deviceAlertStatus(deviceAlert.art, deviceAlert.connected, deviceAlert.usb)}
+												</span>
+											</div>
+											{deviceAlert.connected && deviceAlert.battery !== null && (
+												<DeviceBatteryRing level={deviceAlert.battery} />
+											)}
+										</motion.div>
+									)}
+								</AnimatePresence>
+
 								{/* Calendar & Timer Split View */}
 								<AnimatePresence>
-									{settingsCalendarEnabled && isCalendarMode && (
+									{isOpen && settingsCalendarEnabled && isCalendarMode && (
 										<motion.div
 											className="calendar-timer-content split-view"
 											onClick={(e) =>
@@ -3784,7 +4337,7 @@ function App() {
 
 								{/* Shelf Panel */}
 								<AnimatePresence>
-									{bloomMode === "shelf" && (
+									{isOpen && bloomMode === "shelf" && (
 										<motion.div
 											className="shelf-content"
 											onClick={(e) => e.stopPropagation()}
@@ -3982,9 +4535,11 @@ function App() {
 								left: "50%",
 								background:
 									jarvisStatus?.state === "LISTENING"
-										? "rgba(34, 197, 94, 0.2)"
+										? "rgba(0, 229, 255, 0.25)"
 										: jarvisStatus?.state === "THINKING"
-										? "rgba(168, 85, 247, 0.2)"
+										? "rgba(168, 85, 247, 0.25)"
+										: jarvisStatus?.state === "SPEAKING"
+										? "rgba(16, 185, 129, 0.25)"
 										: "rgba(56, 189, 248, 0.2)"
 							}}
 							initial={{
@@ -4025,9 +4580,11 @@ function App() {
 									color: jarvisStatus?.muted
 										? "#ef4444"
 										: jarvisStatus?.state === "LISTENING"
-										? "#22c55e"
+										? "#00e5ff"
 										: jarvisStatus?.state === "THINKING"
 										? "#c084fc"
+										: jarvisStatus?.state === "SPEAKING"
+										? "#10b981"
 										: "#38bdf8"
 								}}
 							/>

@@ -642,11 +642,27 @@ fn toggle_start_menu() {
     LAST_START_TOGGLE_MS.store(now, Ordering::Relaxed);
 
     tauri::async_runtime::spawn_blocking(move || {
-        use windows::Win32::UI::Input::KeyboardAndMouse::{VK_ESCAPE, VK_LWIN};
+        use windows::Win32::UI::Input::KeyboardAndMouse::VK_ESCAPE;
+        use windows::Win32::UI::WindowsAndMessaging::{
+            FindWindowW, PostMessageW, SC_TASKLIST, WM_SYSCOMMAND,
+        };
         if is_start_menu_open() {
             send_key_tap(VK_ESCAPE, 0);
         } else {
-            send_key_tap(VK_LWIN, START_WIN_KEY_HOLD_MS);
+            // Ask Explorer directly via SC_TASKLIST message (instant, no key injection lag)
+            unsafe {
+                if let Ok(tray) = FindWindowW(windows::core::w!("Shell_TrayWnd"), None) {
+                    let _ = PostMessageW(
+                        Some(tray),
+                        WM_SYSCOMMAND,
+                        windows::Win32::Foundation::WPARAM(SC_TASKLIST as usize),
+                        windows::Win32::Foundation::LPARAM(0),
+                    );
+                } else {
+                    use windows::Win32::UI::Input::KeyboardAndMouse::VK_LWIN;
+                    send_key_tap(VK_LWIN, START_WIN_KEY_HOLD_MS);
+                }
+            }
         }
     });
 }
@@ -798,9 +814,11 @@ fn launch_path(path: &str) {
                             }
                             app_dirs.sort();
                             if let Some(latest) = app_dirs.last() {
-                                let exe = latest.join(Path::new(&final_path).file_name().unwrap());
-                                if exe.exists() {
-                                    final_path = exe.to_string_lossy().to_string();
+                                if let Some(file_name) = Path::new(&final_path).file_name() {
+                                    let exe = latest.join(file_name);
+                                    if exe.exists() {
+                                        final_path = exe.to_string_lossy().to_string();
+                                    }
                                 }
                             }
                         }
@@ -2884,12 +2902,16 @@ pub fn clear_volume_mixer_rect() {
 pub fn release_appbars(handle: &AppHandle) {
     if let Some(w) = handle.get_webview_window("main") {
         if MAIN_APPBAR_REGISTERED.load(Ordering::Relaxed) {
-            unregister_appbar_native(w.hwnd().unwrap());
+            if let Ok(hwnd) = w.hwnd() {
+                unregister_appbar_native(hwnd);
+            }
         }
     }
     if let Some(w) = handle.get_webview_window("dock") {
         if DOCK_APPBAR_REGISTERED.load(Ordering::Relaxed) {
-            unregister_appbar_native(w.hwnd().unwrap());
+            if let Ok(hwnd) = w.hwnd() {
+                unregister_appbar_native(hwnd);
+            }
         }
     }
 }
@@ -2910,6 +2932,7 @@ pub fn restore_taskbar_and_exit(handle: &AppHandle) {
         let _ = w.destroy();
     }
     handle.exit(0);
+    std::process::exit(0);
 }
 
 #[tauri::command]
@@ -2921,10 +2944,14 @@ pub async fn quit_bloom(handle: AppHandle) {
 pub async fn restart_bloom(handle: AppHandle) {
     SHUTTING_DOWN.store(true, Ordering::Relaxed);
     if let Some(w) = handle.get_webview_window("main") {
-        unregister_appbar_native(w.hwnd().unwrap());
+        if let Ok(hwnd) = w.hwnd() {
+            unregister_appbar_native(hwnd);
+        }
     }
     if let Some(w) = handle.get_webview_window("dock") {
-        unregister_appbar_native(w.hwnd().unwrap());
+        if let Ok(hwnd) = w.hwnd() {
+            unregister_appbar_native(hwnd);
+        }
     }
     if let Some(w) = handle.get_webview_window("settings") {
         let _ = w.destroy();
@@ -2950,6 +2977,101 @@ pub async fn close_window(hwnd: isize) {
     })
     .await
     .unwrap_or_default();
+}
+
+#[tauri::command]
+pub async fn end_task(hwnd: Option<isize>, path: Option<String>) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || unsafe {
+        use windows::Win32::Foundation::CloseHandle;
+        use windows::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE};
+        use windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId;
+        use windows::Win32::System::Diagnostics::ToolHelp::{
+            CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+            TH32CS_SNAPPROCESS,
+        };
+
+        let mut terminated = false;
+
+        if let Some(h) = hwnd {
+            let win = HWND(h as *mut _);
+            let mut pid = 0u32;
+            GetWindowThreadProcessId(win, Some(&mut pid));
+            if pid > 0 {
+                if let Ok(handle) = OpenProcess(PROCESS_TERMINATE, false, pid) {
+                    let _ = TerminateProcess(handle, 1);
+                    let _ = CloseHandle(handle);
+                    terminated = true;
+                }
+            }
+        }
+
+        if let Some(ref p) = path {
+            let target_exe = std::path::Path::new(p)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(p)
+                .to_lowercase();
+
+            if !target_exe.is_empty() && !target_exe.eq_ignore_ascii_case("explorer.exe") {
+                if let Ok(snapshot) = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) {
+                    let mut entry = PROCESSENTRY32W {
+                        dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+                        ..Default::default()
+                    };
+                    if Process32FirstW(snapshot, &mut entry).is_ok() {
+                        loop {
+                            let exe_name = String::from_utf16_lossy(&entry.szExeFile)
+                                .trim_matches('\0')
+                                .to_lowercase();
+                            if exe_name == target_exe {
+                                if let Ok(handle) = OpenProcess(PROCESS_TERMINATE, false, entry.th32ProcessID) {
+                                    let _ = TerminateProcess(handle, 1);
+                                    let _ = CloseHandle(handle);
+                                    terminated = true;
+                                }
+                            }
+                            if Process32NextW(snapshot, &mut entry).is_err() {
+                                break;
+                            }
+                        }
+                    }
+                    let _ = CloseHandle(snapshot);
+                }
+            }
+        }
+
+        if let Some(ref p) = path {
+            let target_exe = std::path::Path::new(p)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(p);
+            if !target_exe.is_empty() && !target_exe.eq_ignore_ascii_case("explorer.exe") {
+                use std::os::windows::process::CommandExt;
+                let status = std::process::Command::new("taskkill")
+                    .args(["/F", "/T", "/IM", target_exe])
+                    .creation_flags(0x08000000)
+                    .status();
+                if let Ok(s) = status {
+                    if s.success() {
+                        terminated = true;
+                    }
+                }
+            }
+        }
+
+        if terminated {
+            Ok(())
+        } else {
+            Err("No se pudo finalizar la tarea de este proceso.".into())
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn run_smart_boost() -> Result<crate::optimizer::SmartBoostResult, String> {
+    Ok(crate::optimizer::execute_smart_boost())
 }
 
 fn re_register_appbars(app: &AppHandle, settings: &HashMap<String, serde_json::Value>) {
@@ -4221,6 +4343,15 @@ pub async fn set_default_audio_device(device_id: String) -> Result<(), String> {
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn get_headset_battery() -> Result<Option<u8>, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        crate::razer::get_razer_battery()
+    })
+    .await
+    .map_err(|e| e.to_string())
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]

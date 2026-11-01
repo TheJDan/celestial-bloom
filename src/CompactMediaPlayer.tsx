@@ -1,7 +1,9 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { motion, AnimatePresence, useAnimation } from "framer-motion";
 import { invoke } from "@tauri-apps/api/core";
+import { Mic2, LoaderCircle } from "lucide-react";
 import { Visualizer } from "./App";
+import { useLyrics } from "./hooks/useLyrics";
 import {
 	PlayIcon,
 	PauseIcon,
@@ -34,6 +36,8 @@ interface CompactMediaPlayerProps {
 	volume: number;
 	volumeExpanded: boolean;
 	onVolumeExpandedChange: (expanded: boolean) => void;
+	lyricsExpanded?: boolean;
+	onLyricsExpandedChange?: (expanded: boolean) => void;
 	onTogglePlayPause: () => void;
 	onVolumeChange: (vol: number) => void;
 	prevFront: ReturnType<typeof useAnimation>;
@@ -118,6 +122,8 @@ export function CompactMediaPlayer({
 	volume,
 	volumeExpanded,
 	onVolumeExpandedChange,
+	lyricsExpanded = false,
+	onLyricsExpandedChange,
 	onTogglePlayPause,
 	onVolumeChange,
 	prevFront,
@@ -130,6 +136,8 @@ export function CompactMediaPlayer({
 	onAudioOutputClick
 }: CompactMediaPlayerProps) {
 	const seekRef = useRef<HTMLInputElement>(null);
+	const lyricsListRef = useRef<HTMLDivElement>(null);
+	const activeLyricRef = useRef<HTMLDivElement>(null);
 
 	const positionMs = mediaInfo.position_ms ?? 0;
 	const durationMs = mediaInfo.duration_ms ?? 0;
@@ -140,10 +148,11 @@ export function CompactMediaPlayer({
 	const backendPosRef = useRef(positionMs);
 	const backendTimeRef = useRef(positionUpdatedAt || Date.now());
 	const isSeekingRef = useRef(false);
+	const lastSeekTimeRef = useRef(0);
 
-	// Update refs when backend sends new position (ignore during seek)
+	// Update refs when backend sends new position (ignore during seek and for 1.2s after seek)
 	useEffect(() => {
-		if (!isSeekingRef.current) {
+		if (!isSeekingRef.current && Date.now() - lastSeekTimeRef.current > 1200) {
 			backendPosRef.current = positionMs;
 			backendTimeRef.current = positionUpdatedAt || Date.now();
 		}
@@ -154,6 +163,34 @@ export function CompactMediaPlayer({
 		const elapsed = Date.now() - (positionUpdatedAt || Date.now());
 		return Math.min(positionMs + (isPlaying ? elapsed : 0), durationMs || Infinity);
 	});
+
+	// Synchronized live lyrics from LRCLIB
+	const {
+		lyrics,
+		activeIndex,
+		currentLine,
+		hasLyrics,
+		isLoading: isLyricsLoading,
+		isNonMusicVideo,
+		lyricsEnabled,
+		toggleLyrics
+	} = useLyrics(
+		mediaInfo.title,
+		mediaInfo.artist,
+		displayPosition,
+		isPlaying,
+		durationMs
+	);
+
+	// Auto-scroll active lyric into center view
+	useEffect(() => {
+		if (lyricsExpanded && activeLyricRef.current) {
+			activeLyricRef.current.scrollIntoView({
+				behavior: "smooth",
+				block: "center"
+			});
+		}
+	}, [activeIndex, lyricsExpanded]);
 
 	// Tick: extrapolate position every 250ms
 	useEffect(() => {
@@ -180,6 +217,7 @@ export function CompactMediaPlayer({
 	const handleSeekEnd = useCallback(() => {
 		const seekPos = displayPosition;
 		isSeekingRef.current = false;
+		lastSeekTimeRef.current = Date.now();
 		// Update backend refs to the seek position so extrapolation continues from there
 		backendPosRef.current = seekPos;
 		backendTimeRef.current = Date.now();
@@ -228,12 +266,54 @@ export function CompactMediaPlayer({
 				</div>
 				<div className="cmp-track">
 					<TitleMarquee title={mediaInfo.title} />
-					<span className="cmp-artist">{mediaInfo.artist}</span>
+					<span
+						className="cmp-artist"
+						onClick={(e) => {
+							e.stopPropagation();
+							if (isNonMusicVideo) return;
+							if (onLyricsExpandedChange) {
+								onLyricsExpandedChange(!lyricsExpanded);
+							} else {
+								toggleLyrics();
+							}
+						}}
+						style={{ cursor: isNonMusicVideo ? "default" : "pointer" }}
+						title={
+							isNonMusicVideo
+								? undefined
+								: hasLyrics
+								? lyricsExpanded
+									? "Ocultar panel de letra"
+									: "Clic para ver letra completa"
+								: undefined
+						}
+					>
+						{mediaInfo.artist || "Artista desconocido"}
+					</span>
 				</div>
 				<div className="cmp-visualizer">
 					<Visualizer isPlaying={isPlaying} bars={5} height={16} />
 				</div>
 			</div>
+
+			{/* Real-time synchronized lyrics bar (LRCLIB) */}
+			{currentLine && lyricsEnabled && !lyricsExpanded && !isNonMusicVideo && (
+				<div
+					className="cmp-lyric-bar"
+					onClick={(e) => {
+						e.stopPropagation();
+						if (onLyricsExpandedChange) {
+							onLyricsExpandedChange(true);
+						} else {
+							toggleLyrics();
+						}
+					}}
+					title="Letra sincronizada en tiempo real (clic para expandir vista completa)"
+				>
+					<span className="cmp-lyric-dot">●</span>
+					<span className="cmp-lyric-text">{currentLine}</span>
+				</div>
+			)}
 
 			{/* Row 2: Progress bar */}
 			{durationMs > 0 && (
@@ -337,22 +417,111 @@ export function CompactMediaPlayer({
 					</motion.button>
 				</div>
 
-				<motion.button
-					className="cmp-btn cmp-btn-side"
-					onClick={(e) => {
-						e.stopPropagation();
-						if (onAudioOutputClick) {
-							onAudioOutputClick();
-						} else {
-							invoke("open_sound_settings").catch(() => {});
-						}
-					}}
-					whileTap={{ scale: 0.9 }}
-					title="Audio Output"
-				>
-					<HeadphonesIcon size={22} />
-				</motion.button>
+				<div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+					{!isNonMusicVideo && (
+						<motion.button
+							className={`cmp-btn cmp-btn-side ${lyricsExpanded ? "cmp-btn-active" : ""}`}
+							onClick={(e) => {
+								e.stopPropagation();
+								if (onLyricsExpandedChange) {
+									onLyricsExpandedChange(!lyricsExpanded);
+								}
+							}}
+							whileTap={{ scale: 0.9 }}
+							title={
+								hasLyrics
+									? lyricsExpanded
+										? "Ocultar panel de letra"
+										: "Ver letra completa sincronizada"
+									: "Letra de canción (LRCLIB)"
+							}
+							style={{
+								color: lyricsExpanded ? "#38bdf8" : undefined,
+								position: "relative",
+								opacity: hasLyrics ? 1 : 0.4
+							}}
+						>
+							<Mic2 size={18} />
+							{hasLyrics && !lyricsExpanded && (
+								<span
+									style={{
+										position: "absolute",
+										top: 2,
+										right: 2,
+										width: 5,
+										height: 5,
+										borderRadius: "50%",
+										backgroundColor: "#38bdf8",
+										boxShadow: "0 0 6px #38bdf8"
+									}}
+								/>
+							)}
+						</motion.button>
+					)}
+
+					<motion.button
+						className="cmp-btn cmp-btn-side"
+						onClick={(e) => {
+							e.stopPropagation();
+							if (onAudioOutputClick) {
+								onAudioOutputClick();
+							} else {
+								invoke("open_sound_settings").catch(() => {});
+							}
+						}}
+						whileTap={{ scale: 0.9 }}
+						title="Audio Output"
+					>
+						<HeadphonesIcon size={20} />
+					</motion.button>
+				</div>
 			</div>
+
+			{/* Expanded synchronized lyrics drawer */}
+			<AnimatePresence>
+				{lyricsExpanded && (
+					<motion.div
+						className="cmp-lyrics-container"
+						initial={{ height: 0, opacity: 0 }}
+						animate={{ height: 180, opacity: 1 }}
+						exit={{ height: 0, opacity: 0 }}
+						transition={{ type: "spring", stiffness: 450, damping: 30 }}
+						onClick={(e) => e.stopPropagation()}
+						onWheel={(e) => e.stopPropagation()}
+					>
+						{isLyricsLoading ? (
+							<div className="cmp-lyrics-loading">
+								<LoaderCircle className="cmp-spin" size={16} />
+								<span>Buscando letra...</span>
+							</div>
+						) : lyrics.length > 0 ? (
+							<div ref={lyricsListRef} className="cmp-lyrics-list">
+								{lyrics.map((line, idx) => {
+									const isActive = idx === activeIndex;
+									return (
+										<div
+											key={`${line.timeMs}-${idx}`}
+											ref={isActive ? activeLyricRef : null}
+											className={`cmp-lyric-line ${isActive ? "active" : ""}`}
+											onClick={(e) => {
+												e.stopPropagation();
+												invoke("media_seek", { positionMs: line.timeMs }).catch(() => {});
+											}}
+											title="Clic para saltar a este momento"
+										>
+											{line.text}
+										</div>
+									);
+								})}
+							</div>
+						) : (
+							<div className="cmp-lyrics-empty">
+								<span>♪ {isNonMusicVideo ? "Video sin letra disponible" : "Sin letra disponible para esta canción"}</span>
+							</div>
+						)}
+					</motion.div>
+				)}
+			</AnimatePresence>
 
 			{/* Volume expansion */}
 			<AnimatePresence>

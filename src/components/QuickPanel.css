@@ -350,3 +350,53 @@
 	font-variant-numeric: tabular-nums;
 	letter-spacing: 0.08em;
 }
+
+/* System Tray Row Actions */
+.qp-row-tray {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+}
+
+.qp-row-tray .qp-row-main {
+	flex: 1;
+	min-width: 0;
+}
+
+.qp-row-side-actions {
+	display: flex;
+	align-items: center;
+	gap: 3px;
+	padding-right: 6px;
+	flex: none;
+}
+
+.qp-action-btn {
+	width: 22px;
+	height: 22px;
+	border-radius: 6px;
+	border: none;
+	background: transparent;
+	color: var(--bloom-text-muted, rgba(255, 255, 255, 0.55));
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	cursor: pointer;
+	padding: 0;
+	transition: background 0.15s ease, color 0.15s ease;
+}
+
+.qp-action-btn:hover:not(:disabled) {
+	background: var(--bloom-group-bg, rgba(255, 255, 255, 0.12));
+	color: var(--bloom-text, #ffffff);
+}
+
+.qp-action-btn.qp-close-btn:hover:not(:disabled) {
+	background: rgba(239, 68, 68, 0.22);
+	color: #ef4444;
+}
+
+.qp-action-btn:disabled {
+	opacity: 0.5;
+	cursor: not-allowed;
+}

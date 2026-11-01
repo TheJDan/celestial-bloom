@@ -390,20 +390,38 @@ impl TrayExposure {
             let Ok(element) = elements.GetElement(index) else {
                 continue;
             };
-            if element
+            let is_tray_element = element
                 .CurrentAutomationId()
-                .is_ok_and(|s| s == "SystemTrayIcon")
-                && element
-                    .CurrentName()
-                    .is_ok_and(|s| s.to_string().starts_with("Show Hidden Icons"))
-            {
+                .is_ok_and(|s| s == "SystemTrayIcon" || s == "NotificationChevron" || s == "OverflowChevron");
+
+            if !is_tray_element {
+                continue;
+            }
+
+            let name_str = element.CurrentName().unwrap_or_default().to_string();
+            let lower_name = name_str.to_lowercase();
+
+            // Language-aware chevron matching: English, Spanish, French, German, Portuguese, Italian, Russian, etc.
+            let is_chevron = lower_name.contains("hidden")
+                || lower_name.contains("ocult")
+                || lower_name.contains("chevron")
+                || lower_name.contains("overflow")
+                || lower_name.contains("caché")
+                || lower_name.contains("ausgeblend")
+                || lower_name.contains("nascost")
+                || lower_name.contains("скрыт")
+                || lower_name.contains("隐藏")
+                || lower_name.contains("インジケーター");
+
+            if is_chevron {
                 let pattern = element
                     .GetCurrentPatternAs::<IUIAutomationInvokePattern>(UIA_InvokePatternId)
                     .map_err(|e| e.to_string())?;
-                if element
-                    .CurrentName()
-                    .is_ok_and(|name| name.to_string().ends_with("Hide"))
-                {
+                let is_open_state = lower_name.ends_with("hide")
+                    || lower_name.contains("ocultar")
+                    || lower_name.ends_with("masquer")
+                    || lower_name.ends_with("ausblenden");
+                if is_open_state {
                     // Explorer remembers an open chevron even after Bloom hides
                     // its host; close that stale state before reopening it.
                     pattern.Invoke().map_err(|e| e.to_string())?;

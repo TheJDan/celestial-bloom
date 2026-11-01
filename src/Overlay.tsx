@@ -641,10 +641,16 @@ function OverlayApp() {
 					setScale(parseFloat(settings["bloom-scale"]));
 				}
 				if (settings && settings["bloom-brightness-overlay-enabled"] !== undefined) {
-					setBrightnessOverlayEnabled(settings["bloom-brightness-overlay-enabled"] === "true");
+					setBrightnessOverlayEnabled(settings["bloom-brightness-overlay-enabled"] !== "false");
 				}
 				if (settings && settings["bloom-volume-overlay-enabled"] !== undefined) {
-					setVolumeOverlayEnabled(settings["bloom-volume-overlay-enabled"] === "true");
+					setVolumeOverlayEnabled(settings["bloom-volume-overlay-enabled"] !== "false");
+				}
+				if (settings && settings["bloom-brightness-edge-enabled"] !== undefined) {
+					setBrightnessEdgeEnabled(settings["bloom-brightness-edge-enabled"] !== "false");
+				}
+				if (settings && settings["bloom-volume-edge-enabled"] !== undefined) {
+					setVolumeEdgeEnabled(settings["bloom-volume-edge-enabled"] !== "false");
 				}
 			})
 			.catch(console.error);

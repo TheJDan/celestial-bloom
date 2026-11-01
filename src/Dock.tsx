@@ -619,7 +619,12 @@ const Dock = memo(function Dock() {
 			if (app.path === "start") {
 				await invoke("open_app", { appName: "start" });
 			} else if (app.is_background && app.tray_ids?.length === 1) {
-				await invoke("activate_tray_icon", { trayId: app.tray_ids[0] });
+				try {
+					await invoke("activate_tray_icon", { trayId: app.tray_ids[0] });
+				} catch (trayErr) {
+					console.warn(`activate_tray_icon failed for ${app.name}, falling back to open_app:`, trayErr);
+					await invoke("open_app", { appName: app.path });
+				}
 			} else if (app.all_hwnds && app.all_hwnds.length > 1) {
 				// Several windows: bring the most recent forward, then cycle.
 				await invoke("focus_app_windows", { hwnds: app.all_hwnds.map(([hwnd]) => hwnd) });
@@ -690,11 +695,6 @@ const Dock = memo(function Dock() {
 	const handleContextMenu = (e: React.MouseEvent, app: AppInfo | null) => {
 		e.stopPropagation();
 		e.preventDefault();
-		// Shift-right-click keeps Bloom pin/customization controls available.
-		if (app?.is_background && app.tray_ids?.length === 1 && !e.shiftKey) {
-			void openTrayMenu(app.tray_ids[0]);
-			return;
-		}
 		setContextMenu({ x: e.clientX, y: e.clientY, app });
 	};
 
@@ -1422,6 +1422,7 @@ const Dock = memo(function Dock() {
 																	key={prev.hwnd}
 																	className="preview-item"
 																	onClick={() => invoke("focus_window", { hwnd: prev.hwnd })}
+																	onContextMenu={(e) => handleClosePreview(e, prev.hwnd)}
 																>
 																	<img src={prev.image} alt={`Preview ${idx}`} />
 																	<div className="preview-label">{prev.title || app.name}</div>
@@ -1608,6 +1609,25 @@ const Dock = memo(function Dock() {
 							<div className="menu-item" onClick={() => togglePin(contextMenu.app!)}>
 								{contextMenu.app.is_pinned ? "Unpin from Dock" : "Pin to Dock"}
 							</div>
+							{!contextMenu.app.is_pinned && contextMenu.app.is_background && (
+								<div
+									className="menu-item"
+									onClick={() => {
+										const app = contextMenu.app;
+										if (app) {
+											const pathLower = app.path.toLowerCase().replace(/\\/g, "/");
+											observedTrayPathsRef.current.delete(pathLower);
+											setActiveApps((prev) => prev.filter((a) => a.path !== app.path));
+											setActiveOrder((prev) =>
+												prev.filter((p) => p !== appIdentity(app.path, app.executable, app.name))
+											);
+										}
+										closeMenu();
+									}}
+								>
+									Ocultar del dock
+								</div>
+							)}
 							{contextMenu.app.is_pinned && contextMenu.app.path !== "start" && (
 								<>
 									<div className="menu-divider" />
@@ -1719,7 +1739,7 @@ const Dock = memo(function Dock() {
 									</>
 								);
 							})()}
-							{contextMenu.app.is_running && !contextMenu.app.is_background && (
+							{contextMenu.app.is_running && (
 								<>
 									{contextMenu.app.path === "start" && !contextMenu.app.tray_ids?.length && (
 										<div className="menu-divider" />
@@ -1732,14 +1752,33 @@ const Dock = memo(function Dock() {
 											const app = contextMenu.app;
 											const hwnds =
 												app?.all_hwnds?.map(([hwnd]) => hwnd) ?? (app?.hwnd ? [app.hwnd] : []);
-											await Promise.all(hwnds.map((hwnd) => invoke("close_window", { hwnd })));
+											if (hwnds.length > 0) {
+												await Promise.all(hwnds.map((hwnd) => invoke("close_window", { hwnd })));
+											} else if (app?.tray_ids?.length) {
+												await openTrayMenu(app.tray_ids[0]);
+											}
 											closeMenu();
 										}}
 									>
-										Close{" "}
 										{contextMenu.app.all_hwnds && contextMenu.app.all_hwnds.length > 1
-											? "all windows"
-											: "window"}
+											? "Close all windows"
+											: contextMenu.app.is_background
+												? (contextMenu.app.tray_ids?.length ? "App tray menu" : "Close")
+												: "Close window"}
+									</div>
+									<div
+										className="menu-item quit"
+										style={{ color: "#f87171" }}
+										onClick={async () => {
+											const app = contextMenu.app;
+											if (app) {
+												const hwnd = app.hwnd ?? (app.all_hwnds?.[0]?.[0] ?? null);
+												await invoke("end_task", { hwnd, path: app.path }).catch(showActionError);
+											}
+											closeMenu();
+										}}
+									>
+										Finalizar tarea
 									</div>
 								</>
 							)}

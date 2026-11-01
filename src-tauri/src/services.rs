@@ -111,6 +111,7 @@ fn win_number_index(vk: u16) -> Option<u8> {
 }
 
 /// 3D Alt+Tab window switcher setting cache
+#[allow(dead_code)]
 pub static ALT_TAB_3D_ENABLED: AtomicBool = AtomicBool::new(false);
 pub static DOCK_WIN_NUMBER_ENABLED: AtomicBool = AtomicBool::new(true);
 
@@ -208,11 +209,13 @@ pub fn send_start_menu_mask() {
 
 /// Sends a neutral mask keystroke to tell Windows that Alt was part of a combo,
 /// which completely prevents Windows from activating the window's Menu Bar (SC_KEYMENU).
+#[allow(dead_code)]
 pub fn send_alt_menu_mask() {
     send_start_menu_mask();
 }
 
 /// Explicitly releases Windows key modifiers so Windows never stays with a pressed Win key (preventing accidental Win+L locks).
+#[allow(dead_code)]
 pub fn release_win_key() {
     send_start_menu_mask();
 }
@@ -377,8 +380,19 @@ unsafe extern "system" fn keyboard_hook_proc(
                     || (GetAsyncKeyState(VK_RCONTROL.0 as i32) as u16 & 0x8000) != 0
             };
 
-            // Intercept Alt + Space or Ctrl + Space for Spotlight / Raycast Launcher
-            if is_space && (alt_down || ctrl_phys_down) && !win_down {
+            let alt_left_phys = unsafe {
+                use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LMENU};
+                (GetAsyncKeyState(VK_LMENU.0 as i32) as u16 & 0x8000) != 0
+            };
+            let alt_right_phys = unsafe {
+                use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_RMENU};
+                (GetAsyncKeyState(VK_RMENU.0 as i32) as u16 & 0x8000) != 0
+            };
+            let alt_active = alt_down || alt_left_phys || alt_right_phys;
+
+            // Intercept Alt + Space (Left Alt or Right Alt / AltGr) for Spotlight / Raycast Launcher
+            // Ctrl + Space is explicitly excluded to prevent desktop freezing and allow normal system shortcuts
+            if is_space && alt_active && !win_down {
                 if is_down {
                     let active = !SPOTLIGHT_ACTIVE.load(Ordering::Relaxed);
                     SPOTLIGHT_ACTIVE.store(active, Ordering::Relaxed);
@@ -413,8 +427,8 @@ unsafe extern "system" fn keyboard_hook_proc(
                 }
             }
 
-            // Quick Look with Space in File Explorer
-            if is_space && !alt_down && !win_down {
+            // Quick Look with Space in File Explorer (pure Space only)
+            if is_space && !alt_active && !win_down && !ctrl_phys_down {
                 if QUICK_LOOK_ACTIVE.load(Ordering::Relaxed) {
                     if is_down {
                         QUICK_LOOK_ACTIVE.store(false, Ordering::Relaxed);
@@ -1482,12 +1496,20 @@ pub fn setup_audio_visualization(app_handle: AppHandle) {
                                             output[band_idx] = output[band_idx].clamp(0.18, 1.0);
                                             prev_values[band_idx] = output[band_idx];
                                         }
-                                        let _ = app_handle.emit(
-                                            "audio-visualization",
-                                            AudioVisualizationData {
-                                                frequencies: output.to_vec(),
-                                            },
-                                        );
+                                        if !crate::utils::is_workstation_locked()
+                                            && !SHUTTING_DOWN.load(Ordering::Relaxed)
+                                            && (crate::state::NOTCH_IS_VISIBLE.load(Ordering::Relaxed)
+                                                || crate::state::NOTCH_IS_HOVERED.load(Ordering::Relaxed))
+                                        {
+                                            if let Some(w) = app_handle.get_webview_window("main") {
+                                                let _ = w.emit(
+                                                    "audio-visualization",
+                                                    AudioVisualizationData {
+                                                        frequencies: output.to_vec(),
+                                                    },
+                                                );
+                                            }
+                                        }
                                         buffer_pos = 0;
                                     }
                                 }
@@ -2871,8 +2893,9 @@ static MH_TOP_EDGE_ARMED: AtomicBool = AtomicBool::new(false);
 /// after the cursor has rested in the band for the configured delay. A
 /// pass-through along the bottom strip never arms it. The delay is user-tunable
 /// via `bloom-dock-edge-delay` (ms); `0` restores the old instant behavior.
+#[allow(dead_code)]
 const BOTTOM_EDGE_BAND_PX: f64 = 8.0;
-const BOTTOM_EDGE_DWELL_MS: i64 = 200;
+const BOTTOM_EDGE_DWELL_MS: i64 = 60;
 /// The mouse hook only fires on WM_MOUSEMOVE, so a pending dwell is completed
 /// by a watchdog that re-checks at this cadence.
 const BOTTOM_EDGE_POLL_MS: u64 = 40;
@@ -3053,7 +3076,10 @@ fn apply_capture_ui_state(app: &AppHandle, active: bool) {
     MH_DOCK_EDGE_ARMED.store(false, Ordering::Relaxed);
 }
 
+static MOUSE_HOOK_APP_HANDLE: OnceLock<AppHandle> = OnceLock::new();
+
 pub fn setup_mouse_hook(app_handle: AppHandle) {
+    let _ = MOUSE_HOOK_APP_HANDLE.set(app_handle.clone());
     let (updates, receiver) = sync_channel::<()>(1);
     if MOUSE_HOOK_UPDATES.set(updates).is_err() {
         return;
@@ -3181,7 +3207,8 @@ fn top_edge_dwell_ms(app_handle: &AppHandle) -> i64 {
 }
 
 /// True when the cursor sits inside the top-edge hot band on the primary
-/// monitor. Shared by the dwell gate and top-edge hit-testing continuity.
+/// monitor. Restricted to the horizontal region of the island so moving the cursor
+/// to browser tabs, back buttons, or window controls far from the island never triggers it.
 fn in_top_edge_band(cursor: windows::Win32::Foundation::POINT, scale: f64) -> bool {
     let (mon_x, mon_y) = MH_CACHED_MON_POS
         .lock()
@@ -3195,9 +3222,34 @@ fn in_top_edge_band(cursor: windows::Win32::Foundation::POINT, scale: f64) -> bo
         .map(|s| s.0 as i32)
         .unwrap_or(1920);
 
-    cursor.y <= (mon_y + (TOP_EDGE_BAND_PX * scale) as i32)
-        && cursor.x >= mon_x
-        && cursor.x <= (mon_x + mon_w)
+    if cursor.y > (mon_y + (TOP_EDGE_BAND_PX * scale) as i32) || cursor.y < mon_y {
+        return false;
+    }
+
+    let (min_x, max_x) = if let Ok(region) = NOTCH_RECT.try_lock() {
+        if let Some(r) = *region {
+            let win_x = MAIN_WINDOW_RECT
+                .lock()
+                .ok()
+                .and_then(|g| *g)
+                .map(|(p, _)| p.x)
+                .unwrap_or(mon_x);
+            let rx = win_x + (r.x as f64 * scale) as i32;
+            let rw = (r.width as f64 * scale) as i32;
+            let pad = (60.0 * scale) as i32;
+            (rx - pad, rx + rw + pad)
+        } else {
+            let center_x = mon_x + (mon_w / 2);
+            let half_w = (220.0 * scale) as i32;
+            (center_x - half_w, center_x + half_w)
+        }
+    } else {
+        let center_x = mon_x + (mon_w / 2);
+        let half_w = (220.0 * scale) as i32;
+        (center_x - half_w, center_x + half_w)
+    };
+
+    cursor.x >= min_x && cursor.x <= max_x
 }
 
 /// True once the cursor has stayed inside the top band long enough to count as
@@ -3391,7 +3443,8 @@ fn update_main_interaction(
         // mouseleave that would clear its hover state (it may already have
         // missed it if the pointer left in the same frame). Tell it explicitly
         // or the notch stays expanded in peek/smart mode.
-        if new_ignore == 1 && NOTCH_IS_HOVERED.swap(false, Ordering::Relaxed) {
+        if new_ignore == 1 {
+            NOTCH_IS_HOVERED.store(false, Ordering::Relaxed);
             let _ = app_handle.emit("notch-pointer-left", ());
         }
     }
@@ -3428,17 +3481,10 @@ fn dock_edge_dwell_ms(app_handle: &AppHandle) -> i64 {
 /// True once the cursor has stayed inside the bottom band long enough to count
 /// as a deliberate reveal. Mere contact does not arm: a pass along the bottom
 /// strip on the way to a maximized window's bottom controls must not reveal the
-/// dock. Leaving the band disarms and restarts the clock.
-///
-/// The mouse hook only fires on movement, so `setup_dock_edge_watchdog` also
-/// calls this while a dwell is pending so it can complete on a stationary
-/// cursor.
-fn dock_edge_armed_for(
-    app_handle: &AppHandle,
-    cursor: windows::Win32::Foundation::POINT,
-    now: i64,
-    scale: f64,
-) -> bool {
+/// True when the cursor sits inside the bottom-edge hot band on the primary
+/// monitor. Restricted to the horizontal region of the dock so moving the cursor
+/// to corners or empty sides far from the dock island never triggers it.
+fn in_bottom_edge_band(cursor: windows::Win32::Foundation::POINT, scale: f64) -> bool {
     let (mon_x, mon_y) = MH_CACHED_MON_POS
         .lock()
         .ok()
@@ -3451,11 +3497,49 @@ fn dock_edge_armed_for(
         .map(|s| (s.0 as i32, s.1 as i32))
         .unwrap_or((1920, 1080));
 
-    let in_band = cursor.y >= (mon_y + mon_h - (BOTTOM_EDGE_BAND_PX * scale) as i32)
-        && cursor.x >= mon_x
-        && cursor.x <= (mon_x + mon_w);
+    let band_h = (16.0 * scale) as i32;
+    if cursor.y < (mon_y + mon_h - band_h) || cursor.y > (mon_y + mon_h) {
+        return false;
+    }
 
-    if !in_band {
+    let (min_x, max_x) = if let Ok(region) = DOCK_RECT.try_lock() {
+        if let Some(r) = *region {
+            let win_x = DOCK_WINDOW_RECT
+                .lock()
+                .ok()
+                .and_then(|g| *g)
+                .map(|(p, _)| p.x)
+                .unwrap_or(mon_x);
+            let rx = win_x + (r.x as f64 * scale) as i32;
+            let rw = (r.width as f64 * scale) as i32;
+            let pad = (260.0 * scale) as i32;
+            (rx - pad, rx + rw + pad)
+        } else {
+            let center_x = mon_x + (mon_w / 2);
+            let half_w = (mon_w * 4) / 10;
+            (center_x - half_w, center_x + half_w)
+        }
+    } else {
+        let center_x = mon_x + (mon_w / 2);
+        let half_w = (mon_w * 4) / 10;
+        (center_x - half_w, center_x + half_w)
+    };
+
+    cursor.x >= min_x && cursor.x <= max_x
+}
+
+/// dock. Leaving the band disarms and restarts the clock.
+///
+/// The mouse hook only fires on movement, so `setup_dock_edge_watchdog` also
+/// calls this while a dwell is pending so it can complete on a stationary
+/// cursor.
+fn dock_edge_armed_for(
+    app_handle: &AppHandle,
+    cursor: windows::Win32::Foundation::POINT,
+    now: i64,
+    scale: f64,
+) -> bool {
+    if !in_bottom_edge_band(cursor, scale) {
         MH_DOCK_EDGE_ENTER_MS.store(0, Ordering::Relaxed);
         MH_DOCK_EDGE_ARMED.store(false, Ordering::Relaxed);
         return false;
@@ -3513,12 +3597,12 @@ fn update_dock_interaction(
         return;
     }
 
-    let (mon_x, mon_y) = MH_CACHED_MON_POS
+    let (_mon_x, _mon_y) = MH_CACHED_MON_POS
         .lock()
         .ok()
         .and_then(|g| *g)
         .unwrap_or((0, 0));
-    let (mon_w, mon_h) = MH_CACHED_MON_SIZE
+    let (_mon_w, _mon_h) = MH_CACHED_MON_SIZE
         .lock()
         .ok()
         .and_then(|g| *g)
@@ -3595,9 +3679,7 @@ fn update_dock_interaction(
     let in_dock_hover = DOCK_IS_HOVERED.load(Ordering::Relaxed);
     let scale = dock_win.scale_factor().unwrap_or(1.0);
     let edge_armed = dock_edge_armed_for(app_handle, cursor, now, scale);
-    let at_bottom_edge = cursor.y >= (mon_y + mon_h - (BOTTOM_EDGE_BAND_PX * scale) as i32)
-        && cursor.x >= mon_x
-        && cursor.x <= (mon_x + mon_w);
+    let at_bottom_edge = in_bottom_edge_band(cursor, scale);
 
     if edge_armed || in_dock_hover {
         is_hovered = true;
@@ -3655,15 +3737,58 @@ fn setup_dock_edge_watchdog(app_handle: AppHandle) {
     });
 }
 
+fn is_cursor_in_notch_rect(cursor: windows::Win32::Foundation::POINT) -> bool {
+    let (mon_x, mon_y) = MH_CACHED_MON_POS
+        .lock()
+        .ok()
+        .and_then(|g| *g)
+        .unwrap_or((0, 0));
+    let (win_x, win_y) = MAIN_WINDOW_RECT
+        .lock()
+        .ok()
+        .and_then(|g| *g)
+        .map(|(p, _)| (p.x, p.y))
+        .unwrap_or((mon_x, mon_y));
+    if let Ok(region) = NOTCH_RECT.try_lock() {
+        if let Some(r) = *region {
+            let rx = win_x + r.x;
+            let rw = r.width;
+            let ry = win_y;
+            let rh = r.height;
+            return cursor.x >= (rx - 25) && cursor.x <= (rx + rw + 25) && cursor.y >= ry && cursor.y <= (ry + rh + 15);
+        }
+    }
+    false
+}
+
 unsafe extern "system" fn mouse_hook_proc(
     code: i32,
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> windows::Win32::Foundation::LRESULT {
-    if code >= 0 && wparam.0 == WM_MOUSEMOVE as usize && !SHUTTING_DOWN.load(Ordering::Relaxed) {
-        let cursor = (*(lparam.0 as *const MSLLHOOKSTRUCT)).pt;
-        queue_cursor(cursor);
-        MOUSE_HOOK_LAST_EVENT_MS.store(hook_tick_ms(), Ordering::Relaxed);
+    if code >= 0 && !SHUTTING_DOWN.load(Ordering::Relaxed) {
+        if wparam.0 == WM_MOUSEMOVE as usize {
+            let cursor = (*(lparam.0 as *const MSLLHOOKSTRUCT)).pt;
+            queue_cursor(cursor);
+            MOUSE_HOOK_LAST_EVENT_MS.store(hook_tick_ms(), Ordering::Relaxed);
+        } else if wparam.0 == windows::Win32::UI::WindowsAndMessaging::WM_LBUTTONDOWN as usize
+            || wparam.0 == windows::Win32::UI::WindowsAndMessaging::WM_RBUTTONDOWN as usize
+        {
+            let cursor = (*(lparam.0 as *const MSLLHOOKSTRUCT)).pt;
+            if !is_cursor_in_notch_rect(cursor) {
+                if MH_LAST_MAIN_IGNORE.load(Ordering::Relaxed) == 0 {
+                    if let Some(app) = MOUSE_HOOK_APP_HANDLE.get() {
+                        if let Some(main_win) = app.get_webview_window("main") {
+                            let _ = main_win.set_ignore_cursor_events(true);
+                        }
+                        MH_LAST_MAIN_IGNORE.store(1, Ordering::Relaxed);
+                        NOTCH_IS_HOVERED.store(false, Ordering::Relaxed);
+                        let _ = app.emit("notch-pointer-left", ());
+                    }
+                }
+                let _ = windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture();
+            }
+        }
     }
     CallNextHookEx(None, code, wparam, lparam)
 }
@@ -3723,9 +3848,9 @@ fn process_mouse_position(app_handle: &AppHandle, cursor: windows::Win32::Founda
         let mon_h = cached_size.1 as i32;
 
         let is_inside_primary = cursor.x >= mon_x
-            && cursor.x < (mon_x + mon_w)
+            && cursor.x <= (mon_x + mon_w)
             && cursor.y >= mon_y
-            && cursor.y < (mon_y + mon_h);
+            && cursor.y <= (mon_y + mon_h);
 
         static LAST_HOT_CORNER_TIME: AtomicI64 = AtomicI64::new(0);
         let fg_fs = CURRENT_FOREGROUND_FULLSCREEN.load(Ordering::Relaxed);
@@ -3785,9 +3910,8 @@ fn process_mouse_position(app_handle: &AppHandle, cursor: windows::Win32::Founda
             if MH_LAST_TOP_EDGE_HOVER.swap(0, Ordering::Relaxed) != 0 {
                 let _ = app_handle.emit("notch-edge-hover", false);
             }
-            if NOTCH_IS_HOVERED.swap(false, Ordering::Relaxed) {
-                let _ = app_handle.emit("notch-pointer-left", ());
-            }
+            NOTCH_IS_HOVERED.store(false, Ordering::Relaxed);
+            let _ = app_handle.emit("notch-pointer-left", ());
             if DOCK_IS_HOVERED.swap(false, Ordering::Relaxed) {
                 let _ = app_handle.emit("dock-pointer-left", ());
             }
@@ -3838,12 +3962,24 @@ fn process_mouse_position(app_handle: &AppHandle, cursor: windows::Win32::Founda
 
         // --- Left Edge (Volume) ---
         if !fg_fs {
-            let at_left_edge = cursor.x >= mon_x
-                && cursor.x <= (mon_x + 8)
-                && cursor.y >= mon_y
-                && cursor.y <= (mon_y + mon_h);
+            let bloom_scale = crate::utils::get_bloom_scale(app_handle);
+            let sc = app_handle
+                .primary_monitor()
+                .ok()
+                .flatten()
+                .map(|m| m.scale_factor())
+                .unwrap_or(1.0)
+                * bloom_scale;
+            let nh = (240.0 * sc) as i32;
+            let min_y = mon_y + (40.0 * sc) as i32;
+            let max_y = mon_y + mon_h - (40.0 * sc) as i32;
 
-            // The collapsed card extends past the 8px edge band, so once the
+            let at_left_edge = cursor.x >= (mon_x - 4)
+                && cursor.x <= (mon_x + (18.0 * sc) as i32)
+                && cursor.y >= min_y
+                && cursor.y <= max_y;
+
+            // The collapsed card extends past the edge band, so once the
             // edge hover is established, keep it alive while the cursor is
             // over the card too (otherwise pausing on the mixer button lets
             // the hover expire and the HUD hides mid-click).
@@ -3855,12 +3991,9 @@ fn process_mouse_position(app_handle: &AppHandle, cursor: windows::Win32::Founda
                     .ok()
                     .flatten()
                     .is_some_and(|m| {
-                        let bloom_scale = crate::utils::get_bloom_scale(app_handle);
                         let ms = m.size();
                         let mp = m.position();
-                        let sc = m.scale_factor() * bloom_scale;
-                        let nw = (42.0 * sc) as i32;
-                        let nh = (196.0 * sc) as i32;
+                        let nw = (64.0 * sc) as i32;
                         let nx = mp.x;
                         let ny = mp.y + (ms.height as i32 / 2) - (nh / 2);
                         cursor.x >= nx
@@ -3879,6 +4012,12 @@ fn process_mouse_position(app_handle: &AppHandle, cursor: windows::Win32::Founda
             if prev != new_val {
                 let _ = app_handle.emit("volume-edge-hover", final_left_hover);
                 MH_LAST_LEFT_EDGE_HOVER.store(new_val, Ordering::Relaxed);
+                if final_left_hover {
+                    if let Some(ov) = app_handle.get_webview_window("overlay") {
+                        sync_overlays(app_handle);
+                        let _ = ov.show();
+                    }
+                }
             }
         } else {
             let prev = MH_LAST_LEFT_EDGE_HOVER.load(Ordering::Relaxed);
@@ -3890,12 +4029,52 @@ fn process_mouse_position(app_handle: &AppHandle, cursor: windows::Win32::Founda
 
         // --- Right Edge (Brightness) ---
         if !fg_fs {
-            let at_right_edge = cursor.x >= (mon_x + mon_w - 8)
-                && cursor.x <= (mon_x + mon_w)
-                && cursor.y >= mon_y
-                && cursor.y <= (mon_y + mon_h);
+            let bloom_scale = crate::utils::get_bloom_scale(app_handle);
+            let sc = app_handle
+                .primary_monitor()
+                .ok()
+                .flatten()
+                .map(|m| m.scale_factor())
+                .unwrap_or(1.0)
+                * bloom_scale;
+            let nh = (240.0 * sc) as i32;
+            let min_y = mon_y + (40.0 * sc) as i32;
+            let max_y = mon_y + mon_h - (40.0 * sc) as i32;
 
-            if at_right_edge {
+            // Detect right edge of Primary Monitor (including seam to secondary)
+            let on_primary_right = cursor.x >= (mon_x + mon_w - (18.0 * sc) as i32)
+                && cursor.x <= (mon_x + mon_w + (24.0 * sc) as i32);
+
+            // Also detect far right edge of multi-monitor virtual desktop setup
+            let virtual_right = unsafe {
+                windows::Win32::UI::WindowsAndMessaging::GetSystemMetrics(
+                    windows::Win32::UI::WindowsAndMessaging::SM_XVIRTUALSCREEN,
+                ) + windows::Win32::UI::WindowsAndMessaging::GetSystemMetrics(
+                    windows::Win32::UI::WindowsAndMessaging::SM_CXVIRTUALSCREEN,
+                )
+            };
+            let on_virtual_right = cursor.x >= (virtual_right - (18.0 * sc) as i32);
+
+            let at_right_edge = (on_primary_right || on_virtual_right)
+                && cursor.y >= min_y
+                && cursor.y <= max_y;
+
+            let over_card = !at_right_edge
+                && MH_LAST_RIGHT_EDGE_HOVER.load(Ordering::Relaxed) != 0
+                && app_handle
+                    .primary_monitor()
+                    .ok()
+                    .flatten()
+                    .is_some_and(|m| {
+                        let ms = m.size();
+                        let mp = m.position();
+                        let nw = (64.0 * sc) as i32;
+                        let nx = mp.x + ms.width as i32 - nw;
+                        let ny = mp.y + (ms.height as i32 / 2) - (nh / 2);
+                        cursor.x >= nx && cursor.x <= nx + nw && cursor.y >= ny && cursor.y <= ny + nh
+                    });
+
+            if at_right_edge || over_card {
                 MH_RIGHT_EXPIRY_MS.store(now + 500, Ordering::Relaxed);
             }
 
@@ -3905,6 +4084,12 @@ fn process_mouse_position(app_handle: &AppHandle, cursor: windows::Win32::Founda
             if prev != new_val {
                 let _ = app_handle.emit("brightness-edge-hover", final_right_hover);
                 MH_LAST_RIGHT_EDGE_HOVER.store(new_val, Ordering::Relaxed);
+                if final_right_hover {
+                    if let Some(ov) = app_handle.get_webview_window("overlay") {
+                        sync_overlays(app_handle);
+                        let _ = ov.show();
+                    }
+                }
             }
         } else {
             let prev = MH_LAST_RIGHT_EDGE_HOVER.load(Ordering::Relaxed);
@@ -3934,8 +4119,8 @@ fn process_mouse_position(app_handle: &AppHandle, cursor: windows::Win32::Founda
                         let ms = m.size();
                         let mp = m.position();
                         let sc = m.scale_factor() * bloom_scale;
-                        let nw = (42.0 * sc) as i32;
-                        let nh = (196.0 * sc) as i32;
+                        let nw = (64.0 * sc) as i32;
+                        let nh = (240.0 * sc) as i32;
                         let nx = mp.x;
                         let ny = mp.y + (ms.height as i32 / 2) - (nh / 2);
                         cursor.x >= nx
@@ -3950,8 +4135,8 @@ fn process_mouse_position(app_handle: &AppHandle, cursor: windows::Win32::Founda
                     let ms = m.size();
                     let mp = m.position();
                     let sc = m.scale_factor() * bloom_scale;
-                    let nw = (42.0 * sc) as i32;
-                    let nh = (196.0 * sc) as i32;
+                    let nw = (64.0 * sc) as i32;
+                    let nh = (240.0 * sc) as i32;
                     let nx = mp.x + ms.width as i32 - nw;
                     let ny = mp.y + (ms.height as i32 / 2) - (nh / 2);
                     cursor.x >= nx && cursor.x <= nx + nw && cursor.y >= ny && cursor.y <= ny + nh
@@ -4229,7 +4414,10 @@ fn collect_shortcuts(dir: &std::path::Path, apps: &mut Vec<AppInfo>, depth: i32)
                 .extension()
                 .is_some_and(|e| e.eq_ignore_ascii_case("lnk"))
             {
-                let name = path.file_stem().unwrap().to_string_lossy().to_string();
+                let Some(file_stem) = path.file_stem() else {
+                    continue;
+                };
+                let name = file_stem.to_string_lossy().to_string();
                 if is_helper_name(&name) || name.starts_with("Install") {
                     continue;
                 }
@@ -4293,7 +4481,9 @@ pub fn register_appbar(window: tauri::WebviewWindow) {
     if let Ok(Some(monitor)) = window.app_handle().primary_monitor() {
         let m_size = monitor.size();
         let m_pos = monitor.position();
-        let hwnd = window.hwnd().unwrap();
+        let Ok(hwnd) = window.hwnd() else {
+            return;
+        };
         let scale = monitor.scale_factor();
         let bloom_scale = crate::utils::get_bloom_scale(window.app_handle());
         let ph = ((420.0 * bloom_scale) * scale) as i32;

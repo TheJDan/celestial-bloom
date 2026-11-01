@@ -1,3 +1,10 @@
+pub fn log_boot(msg: &str) {
+    use std::io::Write;
+    let path = "C:\\Users\\JeanA\\AppData\\Local\\bloom\\bloom_boot.log";
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(f, "[PID {}] {}", std::process::id(), msg);
+    }
+}
 use base64::{engine::general_purpose, Engine as _};
 use std::path::PathBuf;
 use std::sync::OnceLock;
@@ -135,30 +142,113 @@ pub fn start_taskbar_watchdog() -> std::io::Result<()> {
     Ok(())
 }
 
+pub fn is_workstation_locked() -> bool {
+    #[link(name = "user32")]
+    extern "system" {
+        fn OpenInputDesktop(dwflags: u32, finherit: i32, dwdesiredaccess: u32) -> *mut std::ffi::c_void;
+        fn CloseDesktop(hdesktop: *mut std::ffi::c_void) -> i32;
+    }
+    unsafe {
+        let desk = OpenInputDesktop(0, 0, 0x0100);
+        if !desk.is_null() {
+            let _ = CloseDesktop(desk);
+            false
+        } else {
+            true
+        }
+    }
+}
+
+fn should_restart_after_crash(marker: &std::path::Path) -> bool {
+    let Some(dir) = marker.parent() else { return true; };
+    let tracker_file = dir.join("crash_restarts.txt");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    if let Ok(contents) = std::fs::read_to_string(&tracker_file) {
+        let parts: Vec<&str> = contents.trim().split(':').collect();
+        if parts.len() == 2 {
+            if let (Ok(count), Ok(last_ts)) = (parts[0].parse::<u32>(), parts[1].parse::<u64>()) {
+                if now.saturating_sub(last_ts) < 30 {
+                    if count >= 5 {
+                        eprintln!("Bloom has crashed 5 times within 30 seconds. Aborting auto-restart to prevent crash loop.");
+                        return false;
+                    }
+                    let _ = std::fs::write(&tracker_file, format!("{}:{}", count + 1, now));
+                    return true;
+                }
+            }
+        }
+    }
+    let _ = std::fs::write(&tracker_file, format!("1:{}", now));
+    true
+}
+
+pub fn clear_crash_restart_counter(app: &tauri::AppHandle) {
+    if let Ok(dir) = app.path().app_config_dir() {
+        let tracker_file = dir.join("crash_restarts.txt");
+        let _ = std::fs::remove_file(tracker_file);
+    }
+}
+
 pub fn run_taskbar_watchdog(parent_pid: u32, marker: PathBuf) {
     use windows::Win32::Foundation::{
         CloseHandle, GetLastError, ERROR_INVALID_PARAMETER, WAIT_OBJECT_0,
     };
     use windows::Win32::System::Threading::{
-        OpenProcess, WaitForSingleObject, INFINITE, PROCESS_SYNCHRONIZE,
+        GetExitCodeProcess, OpenProcess, WaitForSingleObject, INFINITE,
+        PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
     };
+    let mut exit_code: u32 = 0;
+    let mut parent_found = false;
     // Only treat a missing PID as an already-exited parent. Access denied or
     // another wait failure must not restore the taskbar over a live Bloom.
     unsafe {
-        match OpenProcess(PROCESS_SYNCHRONIZE, false, parent_pid) {
+        match OpenProcess(
+            PROCESS_SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION,
+            false,
+            parent_pid,
+        ) {
             Ok(parent) => {
                 let result = WaitForSingleObject(parent, INFINITE);
+                if result == WAIT_OBJECT_0 {
+                    let _ = GetExitCodeProcess(parent, &mut exit_code);
+                    parent_found = true;
+                }
                 let _ = CloseHandle(parent);
                 if result != WAIT_OBJECT_0 {
                     return;
                 }
             }
-            Err(_) if GetLastError() == ERROR_INVALID_PARAMETER => {}
+            Err(_) if GetLastError() == ERROR_INVALID_PARAMETER => {
+                parent_found = true;
+                exit_code = 1;
+            }
             Err(_) => {
                 return;
             }
         }
     }
+
+    if parent_found && exit_code != 0 {
+        eprintln!(
+            "Parent process {} crashed/exited abnormally with exit code {:#X}. Restoring taskbar...",
+            parent_pid, exit_code
+        );
+        restore_taskbar_after_crash();
+
+        if should_restart_after_crash(&marker) {
+            eprintln!("Auto-restarting Bloom after crash...");
+            std::thread::sleep(std::time::Duration::from_millis(1000));
+            if let Ok(exe) = std::env::current_exe() {
+                let _ = std::process::Command::new(exe).spawn();
+            }
+        }
+        return;
+    }
+
     let _ = TASKBAR_MARKER.set(marker.clone());
     // Explorer can be restarting at the same time. Retry briefly, but never
     // act on a marker owned by a replacement Bloom process.
@@ -1259,6 +1349,33 @@ pub fn capture_hwnd_to_base64(hwnd: HWND, max_width: u32, max_height: u32) -> Op
         ReleaseDC(None, hdc_screen);
 
         result
+    }
+}
+
+pub fn set_click_through(hwnd: windows::Win32::Foundation::HWND, ignore: bool) -> bool {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetWindowLongPtrW, SetWindowLongPtrW, GWL_EXSTYLE,
+    };
+    unsafe {
+        let current = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32;
+        let wanted = click_through_style(current, ignore);
+        if wanted == current {
+            return false;
+        }
+        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, wanted as isize);
+        true
+    }
+}
+
+/// The extended style with WS_EX_LAYERED set and WS_EX_TRANSPARENT set only
+/// when ignoring input, every other bit kept.
+fn click_through_style(style: u32, ignore: bool) -> u32 {
+    use windows::Win32::UI::WindowsAndMessaging::{WS_EX_LAYERED, WS_EX_TRANSPARENT};
+    let layered = style | WS_EX_LAYERED.0;
+    if ignore {
+        layered | WS_EX_TRANSPARENT.0
+    } else {
+        layered & !WS_EX_TRANSPARENT.0
     }
 }
 

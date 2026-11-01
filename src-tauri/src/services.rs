@@ -2056,8 +2056,8 @@ pub fn setup_system_worker(app_handle: AppHandle) -> Sender<SystemCommand> {
                     }
                 }
                 use windows::Win32::Graphics::Gdi::{
-                    GetMonitorInfoA, MonitorFromPoint, MonitorFromWindow, MONITORINFO,
-                    MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTOPRIMARY,
+                    GetMonitorInfoA, MonitorFromWindow, MONITORINFO,
+                    MONITOR_DEFAULTTONEAREST,
                 };
                 let mut hwnd = GetForegroundWindow();
 
@@ -2879,40 +2879,6 @@ static MH_CACHED_MON_SIZE: Mutex<Option<(u32, u32)>> = Mutex::new(None);
 static CAPTURE_UI_ACTIVE: AtomicBool = AtomicBool::new(false);
 static CAPTURE_RECHECK: AtomicBool = AtomicBool::new(true);
 static CAPTURE_LAST_SCAN_MS: AtomicI64 = AtomicI64::new(0);
-
-/// Recognizes the native Start/Search surface by its host process. Its window
-/// title is localized, so title-only checks make Smart dock overlap detection
-/// hide the dock on non-English Windows.
-fn is_start_menu_process(process_id: u32) -> bool {
-    if process_id == 0 {
-        return false;
-    }
-    unsafe {
-        let Ok(process) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, process_id) else {
-            return false;
-        };
-        let mut buffer = [0u16; 512];
-        let mut length = buffer.len() as u32;
-        let found = QueryFullProcessImageNameW(
-            process,
-            PROCESS_NAME_WIN32,
-            windows::core::PWSTR(buffer.as_mut_ptr()),
-            &mut length,
-        )
-        .is_ok()
-            && is_start_menu_process_path(&String::from_utf16_lossy(&buffer[..length as usize]));
-        let _ = CloseHandle(process);
-        found
-    }
-}
-
-fn is_start_menu_process_path(path: &str) -> bool {
-    let name = Path::new(path).file_name().and_then(|name| name.to_str());
-    name.is_some_and(|name| {
-        name.eq_ignore_ascii_case("StartMenuExperienceHost.exe")
-            || name.eq_ignore_ascii_case("SearchHost.exe")
-    })
-}
 
 fn is_primary_monitor(flags: u32) -> bool {
     const PRIMARY_MONITOR_FLAG: u32 = 1;

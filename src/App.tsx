@@ -25,57 +25,6 @@ import {
 	HeadphonesIcon
 } from "./icons";
 import { CompactMediaPlayer } from "./CompactMediaPlayer";
-import { DeviceArt, DeviceArtDefs } from "./devices/DeviceArt";
-import { usbArtFor, usbDisplayName, type UsbIdentity } from "./devices/usbArtFor";
-import type { DeviceArtKey } from "./devices/art";
-
-interface UsbConnection extends UsbIdentity {
-	id: string;
-	connected: boolean;
-}
-
-interface DeviceAlert {
-	id: string;
-	art: DeviceArtKey;
-	name: string;
-	connected: boolean;
-	battery: number | null;
-	usb?: boolean;
-	runId: number;
-}
-
-function deviceAlertStatus(art: DeviceArtKey, connected: boolean, wired = false): string {
-	if (art === "sd-card") return connected ? "Insertada" : "Expulsada";
-	if (wired) return connected ? "Conectado" : "Desconectado";
-	return connected ? "Conectado" : "Desconectado";
-}
-
-/** Anillo circular indicador de batería con porcentaje interior */
-function DeviceBatteryRing({ level, charging = false }: { level: number; charging?: boolean }) {
-	const r = 10.5;
-	const circumference = 2 * Math.PI * r;
-	const low = level <= 20 && !charging;
-	return (
-		<div
-			className={`device-alert-battery${low ? " low" : ""}${charging ? " charging" : ""}`}
-			title={`${level}%${charging ? ", cargando" : ""}`}
-		>
-			<svg viewBox="0 0 28 28" width="28" height="28">
-				<circle cx="14" cy="14" r={r} className="track" />
-				<circle
-					cx="14"
-					cy="14"
-					r={r}
-					className="level"
-					strokeDasharray={`${(circumference * level) / 100} ${circumference}`}
-					transform="rotate(-90 14 14)"
-				/>
-			</svg>
-			<span>{level}</span>
-		</div>
-	);
-}
-
 interface ActiveHeadphonesInfo {
 	id: string;
 	name: string;
@@ -569,10 +518,9 @@ type BloomMode =
 	| "shelf"
 	| "wifi"
 	| "bluetooth"
-					setDockMode(dockMode);
-					setDockEnabled(getVal("bloom-dock-enabled", "true") === "true");
 	| "system-tray"
 	| "audio-output"
+	| "devices"
 	| "device";
 
 interface JarvisStatus {
@@ -581,6 +529,7 @@ interface JarvisStatus {
 	muted: boolean;
 	last_command: string;
 	last_response: string;
+}
 
 // A device that just connected or disconnected, shown briefly in the pill.
 interface DeviceAlert {
@@ -1515,6 +1464,11 @@ function App() {
 					}
 					if (cancelled) return;
 					setWaitForStartupSplash(waitForSplash);
+					if (waitForSplash) {
+						runDockInitAfterSplash();
+					} else {
+						runDockInit();
+					}
 					setSystemSettingsReady(true);
 				}
 
@@ -1952,68 +1906,7 @@ function App() {
 	const notchPinnedRef = useRef(false);
 	const releaseDeferredRef = useRef(false);
 
-	const [deviceAlert, setDeviceAlert] = useState<DeviceAlert | null>(null);
-	const deviceAlertRef = useRef<DeviceAlert | null>(null);
-	deviceAlertRef.current = deviceAlert;
-	const deviceAlertTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-	const deviceAlertQueueRef = useRef<Omit<DeviceAlert, "runId">[]>([]);
-	const presentDeviceAlertRef = useRef<(alert: Omit<DeviceAlert, "runId">) => void>(() => {});
-
-	presentDeviceAlertRef.current = (alert) => {
-		const duration = alert.connected ? 3200 : 2500;
-		setDeviceAlert({ ...alert, runId: Date.now() });
-		setBloomMode("device");
-		if (deviceAlertTimerRef.current) clearTimeout(deviceAlertTimerRef.current);
-		deviceAlertTimerRef.current = setTimeout(() => {
-			const next = deviceAlertQueueRef.current.shift();
-			if (next && !isOpenRef.current) presentDeviceAlertRef.current(next);
-			else {
-				deviceAlertQueueRef.current = [];
-				setDeviceAlert(null);
-			}
-		}, duration);
-	};
-
-	const showDeviceAlert = useCallback((alert: Omit<DeviceAlert, "runId">) => {
-		const mode = bloomModeRef.current;
-		if (isOpenRef.current || mode === "announcement" || mode === "shelf") return;
-		const current = deviceAlertRef.current;
-		if (current && current.id !== alert.id) {
-			const queue = deviceAlertQueueRef.current.filter((queued) => queued.id !== alert.id);
-			deviceAlertQueueRef.current = [...queue, alert].slice(-3);
-			return;
-		}
-		presentDeviceAlertRef.current(alert);
-	}, []);
-
-	useEffect(() => {
-		const showWired = ({ payload }: { payload: UsbConnection }) => {
-			const name = usbDisplayName(payload);
-			showDeviceAlert({
-				id: payload.id,
-				art: usbArtFor(payload),
-				name,
-				connected: payload.connected,
-				battery: null,
-				usb: true
-			});
-		};
-		const unlistenUsb = listen<UsbConnection>("usb-connection", showWired);
-		const unlistenJack = listen<UsbConnection>("wired-audio-connection", showWired);
-		return () => {
-			unlistenUsb.then((f) => f());
-			unlistenJack.then((f) => f());
-			if (deviceAlertTimerRef.current) clearTimeout(deviceAlertTimerRef.current);
-		};
-	}, [showDeviceAlert]);
-
-	useEffect(() => {
-		if (bloomMode === "device" && !deviceAlert) {
-			setBloomMode(isOpenRef.current ? openingPanel() : restingModeRef.current);
-		}
-	}, [bloomMode, deviceAlert]);
-
-	// Shared hover-release, called on DOM hover end and when the backend
+		// Shared hover-release, called on DOM hover end and when the backend
 	// reports the pointer left the (now click-through) notch window. Closes an
 	// open notch, remembering its panel, and returns to the resting mode.
 	const releaseNotchHover = () => {

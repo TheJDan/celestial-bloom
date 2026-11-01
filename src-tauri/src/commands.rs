@@ -793,7 +793,6 @@ fn launch_path(path: &str) {
         if let Some(moved) = crate::utils::moved_squirrel_exe(&final_path) {
             final_path = moved;
         }
-        }
 
         let wide_path: Vec<u16> = final_path
             .encode_utf16()
@@ -3053,7 +3052,6 @@ pub fn release_appbars(handle: &AppHandle) {
     if let Some(w) = handle.get_webview_window("dock") {
         if let Ok(hwnd) = w.hwnd() {
             unregister_appbar_native(hwnd);
-        }
         }
     }
     MAIN_APPBAR_REGISTERED.store(false, Ordering::Relaxed);

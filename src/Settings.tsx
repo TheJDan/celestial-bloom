@@ -39,6 +39,7 @@ const TAB_COPY: Record<SettingsTab, string> = {
 	notch: "Choose what appears at the top of your screen.",
 	dock: "Shape the taskbar replacement around your workflow.",
 	overlays: "Keep quick controls visible only when you need them.",
+	jarvis: "Configure JARVIS AI assistant and system automation.",
 	about: "Version, updates and your settings data."
 };
 

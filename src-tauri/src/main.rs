@@ -20,7 +20,6 @@ mod utils;
 mod wifi;
 mod hardware;
 mod optimizer;
-mod jack;
 mod window_region;
 mod razer;
 

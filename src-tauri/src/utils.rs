@@ -1691,33 +1691,6 @@ pub fn capture_hwnd_to_base64(hwnd: HWND, max_width: u32, max_height: u32) -> Op
     }
 }
 
-pub fn set_click_through(hwnd: windows::Win32::Foundation::HWND, ignore: bool) -> bool {
-    use windows::Win32::UI::WindowsAndMessaging::{
-        GetWindowLongPtrW, SetWindowLongPtrW, GWL_EXSTYLE,
-    };
-    unsafe {
-        let current = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32;
-        let wanted = click_through_style(current, ignore);
-        if wanted == current {
-            return false;
-        }
-        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, wanted as isize);
-        true
-    }
-}
-
-/// The extended style with WS_EX_LAYERED set and WS_EX_TRANSPARENT set only
-/// when ignoring input, every other bit kept.
-fn click_through_style(style: u32, ignore: bool) -> u32 {
-    use windows::Win32::UI::WindowsAndMessaging::{WS_EX_LAYERED, WS_EX_TRANSPARENT};
-    let layered = style | WS_EX_LAYERED.0;
-    if ignore {
-        layered | WS_EX_TRANSPARENT.0
-    } else {
-        layered & !WS_EX_TRANSPARENT.0
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::{

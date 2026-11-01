@@ -1,10 +1,17 @@
 import { motion, AnimatePresence, useAnimation } from "framer-motion";
-import { useEffect, useLayoutEffect, useState, useCallback, useRef, memo } from "react";
+import { useEffect, useLayoutEffect, useState, useCallback, useMemo, useRef, memo } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { getVersion } from "@tauri-apps/api/app";
 import type { UpdateCheckResult } from "./updater";
+import { batteryTooltip, type BatteryDetails } from "./batteryTooltip";
+import {
+	createRegionSender,
+	measureElements,
+	notchPillBox,
+	type RegionRect
+} from "./windowRegion";
 import "./App.css";
 import { initTheme } from "./theme";
 import {
@@ -130,6 +137,15 @@ import { WifiPanel } from "./components/WifiPanel";
 import { BluetoothPanel } from "./components/BluetoothPanel";
 import { AudioOutputPanel } from "./components/AudioOutputPanel";
 import { SystemTrayPanel } from "./components/SystemTrayPanel";
+import { DeviceArt, DeviceArtDefs } from "./devices/DeviceArt";
+import { deviceArtFor } from "./devices/deviceArtFor";
+import { deviceLookFor } from "./devices/deviceLooks";
+import type { BudLevel, BudsBattery } from "./devices/connectedDevices";
+import { ConnectedDevicesPanel } from "./components/ConnectedDevicesPanel";
+import { useConnectedDevices } from "./hooks/useConnectedDevices";
+import { isWiredAudio, usbArtFor, usbDisplayName, type UsbIdentity } from "./devices/usbArtFor";
+import type { DeviceArtKey } from "./devices/art";
+
 import {
 	Cpu,
 	MemoryStick,
@@ -162,8 +178,8 @@ import {
  *   Dragging files onto the notch also opens the shelf. Wheel/swipe switches
  *   between tool panels, including when a live activity occupies the pill.
  */
-type NotchPanel = "calendar" | "command-center" | "optimizer";
-const NOTCH_PANELS: readonly NotchPanel[] = ["calendar", "command-center", "optimizer"];
+type NotchPanel = "calendar" | "command-center" | "devices" | "optimizer";
+const NOTCH_PANELS: readonly NotchPanel[] = ["calendar", "command-center", "devices", "optimizer"];
 
 interface HardwareStats {
 	cpu_name: string;
@@ -179,6 +195,11 @@ interface HardwareStats {
 }
 const asNotchPanel = (value: unknown): NotchPanel | null =>
 	NOTCH_PANELS.includes(value as NotchPanel) ? (value as NotchPanel) : null;
+
+// The Connected devices panel grows with its list between these heights;
+// the maximum is the size the panel had before it grew to fit.
+const DEVICES_MIN_HEIGHT = 150;
+const DEVICES_MAX_HEIGHT = 300;
 
 // Pomodoro timer limit.
 const MAX_TIMER_SECONDS = 180 * 60;
@@ -548,6 +569,8 @@ type BloomMode =
 	| "shelf"
 	| "wifi"
 	| "bluetooth"
+					setDockMode(dockMode);
+					setDockEnabled(getVal("bloom-dock-enabled", "true") === "true");
 	| "system-tray"
 	| "audio-output"
 	| "device";
@@ -558,6 +581,110 @@ interface JarvisStatus {
 	muted: boolean;
 	last_command: string;
 	last_response: string;
+
+// A device that just connected or disconnected, shown briefly in the pill.
+interface DeviceAlert {
+	// The device's id, so a later battery report can find its alert.
+	id: string;
+	art: DeviceArtKey;
+	name: string;
+	connected: boolean;
+	battery: number | null;
+	// Each bud's and the case's battery, for earbuds that report them.
+	buds?: BudsBattery | null;
+	// A USB device, which has no list to open when the alert is clicked.
+	usb?: boolean;
+	// Changes on every alert, so the drawing replays its animation.
+	runId: number;
+}
+
+// As sent by the backend's `bluetooth-connection` event.
+interface BluetoothConnection {
+	id: string;
+	name: string;
+	kind: string;
+	form: string | null;
+	connected: boolean;
+	battery: number | null;
+}
+
+/** A USB device plugged in or removed, from the backend's `usb-connection`. */
+interface UsbConnection extends UsbIdentity {
+	/** The device's container id. */
+	id: string;
+	connected: boolean;
+}
+
+// What a device alert says: wired and USB devices are plugged in, cards
+// inserted, everything else connected.
+const PLUGGED_ART = new Set<DeviceArtKey>([
+	"headphones-wired",
+	"earbuds-usbc",
+	"earbuds-jack",
+	"flash-drive",
+	"ssd",
+	"hub",
+	"webcam",
+	"microphone"
+]);
+function deviceAlertStatus(art: DeviceArtKey, connected: boolean, wired = false): string {
+	if (art === "sd-card") return connected ? "Inserted" : "Removed";
+	// A wired device is plugged in whatever it was picked to look like.
+	if (wired || PLUGGED_ART.has(art)) return connected ? "Plugged in" : "Unplugged";
+	return connected ? "Connected" : "Disconnected";
+}
+
+// How long a device alert stays in the pill.
+const DEVICE_ALERT_MS = { connected: 4200, disconnected: 2600 };
+// How many alerts for other devices can wait behind the one showing.
+const DEVICE_ALERT_QUEUE = 3;
+
+/** A small ring showing a device's battery, with the level in the middle. */
+function DeviceBatteryRing({ level, charging = false }: { level: number; charging?: boolean }) {
+	const r = 10.5;
+	const circumference = 2 * Math.PI * r;
+	const low = level <= 20 && !charging;
+	return (
+		<div
+			className={`device-alert-battery${low ? " low" : ""}${charging ? " charging" : ""}`}
+			title={`${level}%${charging ? ", charging" : ""}`}
+		>
+			<svg viewBox="0 0 28 28" width="28" height="28">
+				<circle cx="14" cy="14" r={r} className="track" />
+				<circle
+					cx="14"
+					cy="14"
+					r={r}
+					className="level"
+					strokeDasharray={`${(circumference * level) / 100} ${circumference}`}
+					transform="rotate(-90 14 14)"
+				/>
+			</svg>
+			<span>{level}</span>
+		</div>
+	);
+}
+
+// Each bud's and the case's battery, for earbuds that report them: a ring
+// per part with its label underneath. Parts with no reading are left out.
+function DeviceBudsBattery({ buds }: { buds: BudsBattery }) {
+	const parts: [string, BudLevel][] = [];
+	if (buds.left) parts.push(["L", buds.left]);
+	if (buds.right) parts.push(["R", buds.right]);
+	if (buds.case) parts.push(["Case", buds.case]);
+	return (
+		<div className="device-alert-buds">
+			{parts.map(([label, part]) => (
+				<div key={label} className="device-alert-bud">
+					<DeviceBatteryRing level={part.level} charging={part.charging} />
+					<span className="device-alert-bud-label">
+						{label}
+						{part.charging && <Zap className="device-alert-bud-charging" />}
+					</span>
+				</div>
+			))}
+		</div>
+	);
 }
 
 // The shelf is a short-lived stash: one row, newest first, oldest evicted.
@@ -715,6 +842,18 @@ function App() {
 
 	const [batteryLevel, setBatteryLevel] = useState(100);
 	const [isCharging, setIsCharging] = useState(false);
+	// Fetched when the pointer reaches the battery widget, for its tooltip.
+	const [batteryDetails, setBatteryDetails] = useState<BatteryDetails | null>(null);
+	// The status widget whose tooltip is open, the side of the pill it hangs
+	// from, and the distance from the widget to just past that edge.
+	const [statusTooltip, setStatusTooltip] = useState<{
+		id: string;
+		side: "below" | "left" | "right";
+		offset: number;
+	} | null>(null);
+	const statusTooltipTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+	// Width the hovered status strip needs so neither side runs into the clock.
+	const [statusFitWidth, setStatusFitWidth] = useState(0);
 	const [showPowerPulse, setShowPowerPulse] = useState(false);
 	const [showLowBatteryPulse, setShowLowBatteryPulse] = useState(false);
 	const [lowBatteryThreshold, setLowBatteryThreshold] = useState(() =>
@@ -936,6 +1075,25 @@ function App() {
 		dismissed: announcementDismissed,
 		dismiss: dismissAnnouncement
 	} = useAnnouncement();
+	const [deviceAlert, setDeviceAlert] = useState<DeviceAlert | null>(null);
+	// Each connected earbud's own levels, as last reported, for Connected devices.
+	const [budsById, setBudsById] = useState<Record<string, BudsBattery>>({});
+	// The height the Connected devices panel's content needs; the open notch
+	// follows it up to DEVICES_MAX_HEIGHT, past which the list scrolls.
+	const [devicesContentHeight, setDevicesContentHeight] = useState(DEVICES_MAX_HEIGHT);
+	const devicesPanelHeight = Math.min(DEVICES_MAX_HEIGHT, Math.max(DEVICES_MIN_HEIGHT, devicesContentHeight));
+	// True from an alert appearing until its exit animation has finished, so
+	// the clock row only comes back once the alert has faded out.
+	const [deviceAlertOnScreen, setDeviceAlertOnScreen] = useState(false);
+	const deviceAlertRef = useRef<DeviceAlert | null>(null);
+	deviceAlertRef.current = deviceAlert;
+	const deviceAlertTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+	useEffect(
+		() => () => {
+			if (deviceAlertTimerRef.current) clearTimeout(deviceAlertTimerRef.current);
+		},
+		[]
+	);
 	const announcementShownRef = useRef<string | null>(null);
 	const announcementOpen = !!announcement && !announcementDismissed;
 	const announcementOpenRef = useRef(false);
@@ -951,7 +1109,6 @@ function App() {
 		if (raw === "auto-hide") return "smart";
 		return raw;
 	});
-	const [dndActive, setDndActive] = useState(false);
 	const [dockEnabled, setDockEnabled] = useState(
 		() => localStorage.getItem("bloom-dock-enabled") !== "false"
 	);
@@ -961,16 +1118,54 @@ function App() {
 	const [isOverlapped, setIsOverlapped] = useState(false);
 	const [interactionState, setInteractionState] = useState<"active" | "grace" | "none">("none");
 	const bloomRef = useRef<HTMLDivElement>(null);
+	// Measured to fit the hovered status strip; see statusFitWidth.
+	const leftWidgetsRef = useRef<HTMLDivElement>(null);
+	const rightWidgetsRef = useRef<HTMLDivElement>(null);
+	const timeCenterRef = useRef<HTMLDivElement>(null);
 	const musicBubbleRef = useRef<HTMLButtonElement>(null);
 	const shelfBubbleRef = useRef<HTMLButtonElement>(null);
 	const reportNotchRect = useRef<() => void>(() => {});
-	const dockEnabledInitial = useRef(true);
-	const dockModeInitial = useRef(true);
-	const notchModeInitial = useRef(true);
+	// The pill's target box in window CSS px, and the sender that applies the
+	// notch window's region (holding earlier regions while it shrinks).
+	const pillTargetRef = useRef<RegionRect | null>(null);
+	const sendNotchRegion = useMemo(
+		() =>
+			createRegionSender((rects) => {
+				invoke("set_window_region", { rects }).catch(() => {});
+			}),
+		[]
+	);
+
+	// Recomputes the notch window's region from the pill's target box and the
+	// floating parts drawn around it, and sends it if it changed. Reads only
+	// refs and the DOM, so it is safe to call from any callback.
+	const updateNotchRegion = () => {
+		const wanted: RegionRect[] = [];
+		if (pillTargetRef.current) wanted.push(pillTargetRef.current);
+		// Each floating part, padded to cover what it paints outside its box: a
+		// tooltip card's shadow reaches 20px out plus a 6px drop, a bubble's
+		// glow less, and the screen corners nothing.
+		wanted.push(
+			...measureElements([
+				[".activity-bubble", 16],
+				[".status-tooltip", 28],
+				[".screen-corner", 0]
+			])
+		);
+		sendNotchRegion(wanted);
+	};
+	const [systemSettingsReady, setSystemSettingsReady] = useState(false);
+	const [waitForStartupSplash, setWaitForStartupSplash] = useState(false);
+	const initialSystemSyncDone = useRef(false);
+	const splashDone = useRef(false);
+	const systemSyncQueue = useRef<Promise<void>>(Promise.resolve());
+	const appliedDock = useRef<{ enabled: boolean; mode: string } | null>(null);
+	const appliedNotchMode = useRef<string | null>(null);
 
 	const isAnyInteraction = isHovered || isNotchHovered || isEdgeHovered;
 	const isHidden =
 		!startupAnimating &&
+		!deviceAlertOnScreen &&
 		((notchMode === "smart" && isOverlapped && interactionState === "none") ||
 			(notchMode === "peek" && interactionState === "none" && !eventPeek));
 
@@ -1018,6 +1213,8 @@ function App() {
 						height: Math.round(bottom - top)
 					}
 				}).catch(() => {});
+				// Bubbles finishing their entrance land here too.
+				updateNotchRegion();
 			}
 		};
 		reportNotchRect.current = updateRect;
@@ -1137,6 +1334,15 @@ function App() {
 	const [settingsCalendarEnabled, setSettingsCalendarEnabled] = useState(
 		() => localStorage.getItem("bloom-calendar-enabled") !== "false"
 	);
+	// Which panels the notch shows. Calendar and Controls are on by default;
+	// Connected devices (and panels added later) are opt-in.
+	const [settingsControlsPanelEnabled, setSettingsControlsPanelEnabled] = useState(
+		() => localStorage.getItem("bloom-notch-command-center-enabled") !== "false"
+	);
+	const [settingsDevicesPanelEnabled, setSettingsDevicesPanelEnabled] = useState(
+		() => localStorage.getItem("bloom-notch-devices-enabled") === "true"
+	);
+	const connectedDevices = useConnectedDevices(windowLabel === "main" && settingsDevicesPanelEnabled);
 	const [settingsTimerSoundEnabled, setSettingsTimerSoundEnabled] = useState(
 		() => localStorage.getItem("bloom-timer-sound-enabled") !== "false"
 	);
@@ -1194,10 +1400,12 @@ function App() {
 
 	useEffect(() => {
 		if (!windowLabel) return;
+		let cancelled = false;
 
 		invoke("load_settings")
 			.then(async (settings: any) => {
 				if (await reloadIfMirrorWasStale(settings)) return;
+				if (cancelled) return;
 				const getVal = (key: string, fallback: string | null = null) => {
 					const val = settings[key];
 					if (val !== undefined && val !== null) return String(val);
@@ -1208,6 +1416,10 @@ function App() {
 
 				setSettingsWeatherEnabled(getVal("bloom-weather-enabled", "true") !== "false");
 				setSettingsCalendarEnabled(getVal("bloom-calendar-enabled", "true") !== "false");
+				setSettingsControlsPanelEnabled(
+					getVal("bloom-notch-command-center-enabled", "true") !== "false"
+				);
+				setSettingsDevicesPanelEnabled(getVal("bloom-notch-devices-enabled", "false") === "true");
 				setSettingsTimerSoundEnabled(getVal("bloom-timer-sound-enabled", "true") !== "false");
 				setSettingsMusicModeEnabled(getVal("bloom-music-mode-enabled", "true") !== "false");
 				setRememberPanelEnabled(
@@ -1293,19 +1505,17 @@ function App() {
 					};
 
 					const storedVersion = localStorage.getItem("bloom-app-version");
-					if (firstRun || storedVersion === null) {
-						runDockInitAfterSplash();
-					} else {
-						getVersion()
-							.then((currentVersion) => {
-								if (storedVersion !== currentVersion) {
-									runDockInitAfterSplash();
-								} else {
-									runDockInit();
-								}
-							})
-							.catch(() => runDockInit());
+					let waitForSplash = firstRun || storedVersion === null;
+					if (!waitForSplash) {
+						try {
+							waitForSplash = storedVersion !== (await getVersion());
+						} catch {
+							// Version lookup is optional; continue startup without a splash.
+						}
 					}
+					if (cancelled) return;
+					setWaitForStartupSplash(waitForSplash);
+					setSystemSettingsReady(true);
 				}
 
 				const scaleVal = getVal("bloom-notch-scale") ?? getVal("bloom-scale");
@@ -1321,7 +1531,13 @@ function App() {
 					} catch {}
 				}
 			})
-			.catch(console.error);
+			.catch((error) => {
+				console.error(error);
+				if (!cancelled && windowLabel === "main") setSystemSettingsReady(true);
+			});
+		return () => {
+			cancelled = true;
+		};
 	}, [windowLabel]); // eslint-disable-line react-hooks/exhaustive-deps
 
 	useEffect(() => {
@@ -1362,6 +1578,8 @@ function App() {
 		{
 			"bloom-weather-enabled": setSettingsWeatherEnabled,
 			"bloom-calendar-enabled": setSettingsCalendarEnabled,
+			"bloom-notch-command-center-enabled": setSettingsControlsPanelEnabled,
+			"bloom-notch-devices-enabled": setSettingsDevicesPanelEnabled,
 			"bloom-timer-sound-enabled": setSettingsTimerSoundEnabled,
 			"bloom-music-mode-enabled": setSettingsMusicModeEnabled,
 			"bloom-notch-remember-panel": setRememberPanelEnabled,
@@ -1399,41 +1617,97 @@ function App() {
 		[windowLabel]
 	);
 
-	// Side effects: dock-enabled (skip first render — startup code handles initial state)
+	// One owner applies the latest window settings. Superseded splash timers and
+	// retries are cancelled; an in-flight command finishes before the new state
+	// is applied, so an old startup retry cannot overwrite a user change.
 	useEffect(() => {
-		if (windowLabel !== "main") return;
-		if (dockEnabledInitial.current) {
-			dockEnabledInitial.current = false;
-			return;
-		}
-		if (dockEnabled) {
-			invoke("init_dock", { mode: localStorage.getItem("bloom-dock-mode") || "smart" });
+		if (windowLabel !== "main" || !systemSettingsReady) return;
+
+		let cancelled = false;
+		let started = false;
+		let attempts = 0;
+		let startTimer: number | undefined;
+		let splashTimer: number | undefined;
+		let retryTimer: number | undefined;
+		let settleTimer: number | undefined;
+		let unlistenSplash: (() => void) | undefined;
+
+		const reconcile = () => {
+			systemSyncQueue.current = systemSyncQueue.current
+				.catch(() => {})
+				.then(async () => {
+					if (cancelled) return;
+					try {
+						if (dockEnabled) {
+							if (!appliedDock.current?.enabled) {
+								await invoke("init_dock", { mode: dockMode });
+								appliedDock.current = { enabled: true, mode: dockMode };
+							} else if (appliedDock.current.mode !== dockMode) {
+								await invoke("change_dock_mode", { mode: dockMode });
+								appliedDock.current = { enabled: true, mode: dockMode };
+							}
+						} else if (appliedDock.current?.enabled !== false) {
+							await invoke("toggle_dock", { enable: false });
+							appliedDock.current = { enabled: false, mode: dockMode };
+						}
+						if (cancelled) return;
+						if (appliedNotchMode.current !== notchMode) {
+							await invoke("change_notch_mode", { mode: notchMode });
+							appliedNotchMode.current = notchMode;
+						}
+						if (cancelled) return;
+						await invoke("sync_appbar");
+						if (cancelled) return;
+						const wasInitialSync = !initialSystemSyncDone.current;
+						initialSystemSyncDone.current = true;
+						if (wasInitialSync) {
+							settleTimer = window.setTimeout(() => {
+								if (!cancelled) {
+									systemSyncQueue.current = systemSyncQueue.current
+										.catch(() => {})
+										.then(() => invoke<void>("sync_appbar"))
+										.catch((error) => console.error("AppBar settle failed", error));
+								}
+							}, 1000);
+						}
+					} catch (error) {
+						console.error("Window reconciliation failed", error);
+						if (!cancelled && attempts++ < 1) {
+							retryTimer = window.setTimeout(reconcile, 1000);
+						}
+					}
+				});
+		};
+
+		const start = () => {
+			if (cancelled || started) return;
+			started = true;
+			splashDone.current = true;
+			if (splashTimer !== undefined) window.clearTimeout(splashTimer);
+			unlistenSplash?.();
+			startTimer = window.setTimeout(reconcile, initialSystemSyncDone.current ? 0 : 400);
+		};
+
+		if (waitForStartupSplash && !splashDone.current && !initialSystemSyncDone.current) {
+			void listen("splash-done", start)
+				.then((unlisten) => {
+					if (cancelled || started) unlisten();
+					else unlistenSplash = unlisten;
+				})
+				.catch(() => start());
+			splashTimer = window.setTimeout(start, 6000);
 		} else {
-			invoke("toggle_dock", { enable: false });
+			start();
 		}
-		setTimeout(() => invoke("sync_appbar"), 200);
-	}, [dockEnabled, windowLabel]);
 
-	// Side effects: dock-mode (skip first render)
-	useEffect(() => {
-		if (windowLabel !== "main") return;
-		if (dockModeInitial.current) {
-			dockModeInitial.current = false;
-			return;
-		}
-		invoke("change_dock_mode", { mode: dockMode });
-		setTimeout(() => invoke("sync_appbar"), 200);
-	}, [dockMode, windowLabel]);
-
-	// Side effects: notch-mode (skip first render)
-	useEffect(() => {
-		if (windowLabel !== "main") return;
-		if (notchModeInitial.current) {
-			notchModeInitial.current = false;
-			return;
-		}
-		invoke("change_notch_mode", { mode: notchMode });
-	}, [notchMode, windowLabel]);
+		return () => {
+			cancelled = true;
+			for (const timer of [startTimer, splashTimer, retryTimer, settleTimer]) {
+				if (timer !== undefined) window.clearTimeout(timer);
+			}
+			unlistenSplash?.();
+		};
+	}, [windowLabel, systemSettingsReady, waitForStartupSplash, dockEnabled, dockMode, notchMode]);
 
 	// Bloom mode state: 'music', 'calendar', 'command-center', 'announcement', 'shelf', or 'status'
 	const [bloomMode, setBloomMode] = useState<BloomMode>("status");
@@ -1767,6 +2041,7 @@ function App() {
 			prev === "bluetooth" ||
 			prev === "system-tray" ||
 			prev === "audio-output" ||
+			prev === "devices" ||
 			prev === "device"
 				? restingModeRef.current
 				: prev
@@ -2027,9 +2302,17 @@ function App() {
 		if (cycleBloomMode(delta > 0 ? 1 : -1)) lastScrollTime.current = now;
 	};
 
-	function panelAvailable(panel: NotchPanel) {
+	function panelEnabled(panel: NotchPanel) {
 		if (panel === "calendar") return settingsCalendarEnabled;
-		return true;
+		if (panel === "command-center") return settingsControlsPanelEnabled;
+		return settingsDevicesPanelEnabled;
+	}
+
+	// Settings keeps at least one panel on; if a hand-edited settings file turns
+	// them all off, Controls stays so the open notch is never empty.
+	function panelAvailable(panel: NotchPanel) {
+		if (!NOTCH_PANELS.some(panelEnabled)) return panel === "command-center";
+		return panelEnabled(panel);
 	}
 
 	// Wheel and swipe navigate panels, even from a collapsed live activity.
@@ -2247,10 +2530,11 @@ function App() {
 	bloomModeRef.current = bloomMode;
 
 	// A click opens the last-used panel when memory is enabled, otherwise the
-	// selected default. The controls panel is always available as a fallback.
+	// selected default. If that panel is turned off, the first one that's on.
 	const openingPanel = (): NotchPanel => {
 		const preferred = rememberPanelEnabled ? lastPanel ?? defaultPanel : defaultPanel;
-		return panelAvailable(preferred) ? preferred : "command-center";
+		if (panelAvailable(preferred)) return preferred;
+		return NOTCH_PANELS.find(panelAvailable) ?? "command-center";
 	};
 
 	// Expands the notch into a panel, or into an activity's own view.
@@ -2323,12 +2607,19 @@ function App() {
 		lastPlayingRef.current = isPlaying;
 	}, [isPlaying, mediaInfo.title, notchMode, triggerEventPeek]);
 
-	// Reset bloom mode when calendar setting is disabled
+	// Leave a panel that has just been turned off in Settings.
 	useEffect(() => {
-		if (!settingsCalendarEnabled && bloomMode === "calendar") {
+		const panel = asNotchPanel(bloomMode);
+		if (panel && !panelAvailable(panel)) {
 			setBloomMode(isOpen ? openingPanel() : collapsedMode);
 		}
-	}, [settingsCalendarEnabled, bloomMode, isOpen]);
+	}, [
+		settingsCalendarEnabled,
+		settingsControlsPanelEnabled,
+		settingsDevicesPanelEnabled,
+		bloomMode,
+		isOpen
+	]);
 
 	// Leave the music view when music is turned off or the player ends its media
 	// session: an open notch falls back to the remembered panel.
@@ -2337,6 +2628,157 @@ function App() {
 			setBloomMode(isOpen ? openingPanel() : collapsedMode);
 		}
 	}, [settingsMusicModeEnabled, mediaInfo.has_media, bloomMode, isOpen]);
+
+	// A device connecting or disconnecting takes the pill for a few seconds,
+	// like the Dynamic Island: its drawing, name and battery. It never takes
+	// over a notch the user has open, an announcement or the shelf. In peek
+	// and smart modes it shows the notch for as long as it lasts.
+	//
+	// Alerts for other devices wait their turn (two drives plugged in
+	// together show one after the other); a newer alert for the device on
+	// screen replaces it. The queue is short: a burst of devices shouldn't
+	// hold the notch for long.
+	const deviceAlertQueueRef = useRef<Omit<DeviceAlert, "runId">[]>([]);
+	const presentDeviceAlertRef = useRef<(alert: Omit<DeviceAlert, "runId">) => void>(() => {});
+	presentDeviceAlertRef.current = (alert) => {
+		const duration = alert.connected ? DEVICE_ALERT_MS.connected : DEVICE_ALERT_MS.disconnected;
+		setDeviceAlert({ ...alert, runId: Date.now() });
+		setDeviceAlertOnScreen(true);
+		setBloomMode("device");
+		if (notchMode === "peek") triggerEventPeek(duration);
+		if (deviceAlertTimerRef.current) clearTimeout(deviceAlertTimerRef.current);
+		deviceAlertTimerRef.current = setTimeout(() => {
+			const next = deviceAlertQueueRef.current.shift();
+			if (next && !isOpenRef.current) presentDeviceAlertRef.current(next);
+			else {
+				deviceAlertQueueRef.current = [];
+				setDeviceAlert(null);
+			}
+		}, duration);
+	};
+	const showDeviceAlert = useCallback((alert: Omit<DeviceAlert, "runId">) => {
+		const mode = bloomModeRef.current;
+		if (isOpenRef.current || mode === "announcement" || mode === "shelf") return;
+		const current = deviceAlertRef.current;
+		if (current && current.id !== alert.id) {
+			const queue = deviceAlertQueueRef.current.filter((queued) => queued.id !== alert.id);
+			deviceAlertQueueRef.current = [...queue, alert].slice(-DEVICE_ALERT_QUEUE);
+			return;
+		}
+		presentDeviceAlertRef.current(alert);
+	}, []);
+
+	useEffect(() => {
+		if (windowLabel !== "main") return;
+		const unlistenConnection = listen<BluetoothConnection>("bluetooth-connection", ({ payload }) => {
+			showDeviceAlert({
+				id: payload.id,
+				art: deviceLookFor(payload.name) ?? deviceArtFor(payload),
+				name: payload.name,
+				connected: payload.connected,
+				battery: payload.battery
+			});
+			// A disconnected device's bud levels are out of date by its next connect.
+			if (!payload.connected) {
+				setBudsById((all) => {
+					if (!(payload.id in all)) return all;
+					const { [payload.id]: _gone, ...rest } = all;
+					return rest;
+				});
+			}
+		});
+		// Windows often reports a battery level a moment after the device
+		// connects; fill it into the alert if that device is still showing.
+		const unlistenBattery = listen<{ id: string; battery: number }>("bluetooth-battery", ({ payload }) => {
+			setDeviceAlert((alert) =>
+				alert && alert.id === payload.id && alert.connected ? { ...alert, battery: payload.battery } : alert
+			);
+		});
+		// Earbuds that report each bud's and the case's level send them a
+		// moment after connecting.
+		const unlistenBuds = listen<BudsBattery & { id: string }>("bluetooth-buds", ({ payload }) => {
+			const { id, ...buds } = payload;
+			setDeviceAlert((alert) => (alert && alert.id === id && alert.connected ? { ...alert, buds } : alert));
+			setBudsById((all) => ({ ...all, [id]: buds }));
+		});
+		// USB devices, and what's plugged into the 3.5 mm jack. A wired audio
+		// device's drawing can be picked in Connected devices.
+		const showWired = ({ payload }: { payload: UsbConnection }) => {
+			const name = usbDisplayName(payload);
+			showDeviceAlert({
+				id: payload.id,
+				art: (isWiredAudio(payload.class) ? deviceLookFor(name) : null) ?? usbArtFor(payload),
+				name,
+				connected: payload.connected,
+				battery: null,
+				usb: true
+			});
+		};
+		const unlistenUsb = listen<UsbConnection>("usb-connection", showWired);
+		const unlistenJack = listen<UsbConnection>("wired-audio-connection", showWired);
+		return () => {
+			unlistenConnection.then((f) => f());
+			unlistenBattery.then((f) => f());
+			unlistenUsb.then((f) => f());
+			unlistenJack.then((f) => f());
+			unlistenBuds.then((f) => f());
+		};
+	}, [windowLabel, showDeviceAlert]);
+
+	// In a dev build, any drawing can be shown from the console, e.g.
+	// __bloomDeviceAlert("stem-buds", "AirPods Pro", true, 82), and a late
+	// battery report sent with __bloomDeviceBattery("dev", 64).
+	useEffect(() => {
+		if (!import.meta.env.DEV) return;
+		const w = window as unknown as Record<string, unknown>;
+		w.__bloomDeviceAlert = (art: DeviceArtKey, name: string, connected = true, battery: number | null = null) =>
+			showDeviceAlert({ id: "dev", art, name, connected, battery });
+		// __bloomUsb("disk", "SanDisk Cruzer Blade USB Device", true, "a")
+		// stands in for the backend's usb-connection event.
+		w.__bloomUsb = (kind: string, name: string, connected = true, id = "usb-dev") =>
+			showDeviceAlert({
+				id,
+				art: usbArtFor({ class: kind, name }),
+				name: usbDisplayName({ class: kind, name }),
+				connected,
+				battery: null,
+				usb: true
+			});
+		// __bloomDeviceBuds("dev", [90, false], [80, true], [40, false]) stands
+		// in for bluetooth-buds; pass null for a part with no reading.
+		const part = (p: [number, boolean] | null) => (p ? { level: p[0], charging: p[1] } : null);
+		w.__bloomDeviceBuds = (
+			id: string,
+			left: [number, boolean] | null,
+			right: [number, boolean] | null,
+			caseLevel: [number, boolean] | null
+		) =>
+			setDeviceAlert((alert) =>
+				alert && alert.id === id && alert.connected
+					? { ...alert, buds: { left: part(left), right: part(right), case: part(caseLevel) } }
+					: alert
+			);
+		w.__bloomDeviceBattery = (id: string, battery: number) =>
+			setDeviceAlert((alert) => (alert && alert.id === id && alert.connected ? { ...alert, battery } : alert));
+	}, [showDeviceAlert]);
+
+	// The clock row normally returns when the alert's exit animation ends.
+	// If the alert never rendered (the notch was still starting up), there's
+	// no exit to wait for, so bring it back shortly after the alert ends.
+	useEffect(() => {
+		if (deviceAlert) return;
+		const timer = setTimeout(() => setDeviceAlertOnScreen(false), 400);
+		return () => clearTimeout(timer);
+	}, [deviceAlert]);
+
+	// Back to the resting view once the alert is over.
+	useEffect(() => {
+		if (bloomMode === "device" && !deviceAlert) {
+			setBloomMode(isOpenRef.current ? openingPanel() : collapsedMode);
+		}
+		// openingPanel only reads settings state already in this render.
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, [bloomMode, deviceAlert, collapsedMode]);
 
 	// The collapsed notch always shows its current live activity: music while a
 	// session exists, the timer (with music in its bubble) once one is set, and
@@ -2694,6 +3136,77 @@ function App() {
 		}
 	}, [bluetoothEnabled]);
 
+	// The notch never takes focus, and native `title` tooltips only show for an
+	// active window, so the status widgets draw their own. A tooltip opens
+	// after a tooltip-like delay, by which time the battery details fetched on
+	// enter are in. Under the status strip it hangs below the pill; once the
+	// notch is open the pill is the tall panel, so it sits beside the pill on
+	// the widget's side instead, level with the widget.
+	const showStatusTooltip = useCallback(
+		(id: string, widget: HTMLElement) => {
+			if (statusTooltipTimerRef.current) clearTimeout(statusTooltipTimerRef.current);
+			statusTooltipTimerRef.current = setTimeout(() => {
+				const pill = bloomRef.current?.getBoundingClientRect();
+				const own = widget.getBoundingClientRect();
+				// Client rects are zoomed by the notch scale; offsets are not.
+				if (!pill) {
+					setStatusTooltip({ id, side: "below", offset: 8 });
+				} else if (!isOpen) {
+					const gap = (pill.bottom - own.bottom) / scale;
+					setStatusTooltip({ id, side: "below", offset: Math.max(0, gap) + 8 });
+				} else if (own.left + own.width / 2 >= pill.left + pill.width / 2) {
+					const gap = (pill.right - own.right) / scale;
+					setStatusTooltip({ id, side: "right", offset: Math.max(0, gap) + 10 });
+				} else {
+					const gap = (own.left - pill.left) / scale;
+					setStatusTooltip({ id, side: "left", offset: Math.max(0, gap) + 10 });
+				}
+			}, 400);
+		},
+		[scale, isOpen]
+	);
+
+	const hideStatusTooltip = useCallback(() => {
+		if (statusTooltipTimerRef.current) clearTimeout(statusTooltipTimerRef.current);
+		statusTooltipTimerRef.current = null;
+		setStatusTooltip(null);
+	}, []);
+
+	// Widgets unmount when the notch collapses, without a mouse leave, and an
+	// open card is placed for the notch's shape when it opened.
+	useEffect(() => {
+		hideStatusTooltip();
+	}, [isHovered, isOpen, hideStatusTooltip]);
+
+	// Both sides of the status strip get equal width around the centered
+	// clock, so the notch must fit the clock plus twice the wider side. Widget
+	// widths vary (network speed especially), so they are measured rather than
+	// counted. The width only grows during a hover, so a live label getting
+	// shorter doesn't make the notch jitter. Layout widths are unaffected by
+	// the notch scale.
+	useLayoutEffect(() => {
+		if (!isHovered || bloomMode !== "status") {
+			if (statusFitWidth !== 0) setStatusFitWidth(0);
+			return;
+		}
+		// offsetWidth, not scrollWidth: an open tooltip card overflows its
+		// widget and must not widen the notch.
+		const side = Math.max(
+			leftWidgetsRef.current?.offsetWidth ?? 0,
+			rightWidgetsRef.current?.offsetWidth ?? 0
+		);
+		const clock = timeCenterRef.current?.offsetWidth ?? 0;
+		// The pill's 12px padding on each side, and a 10px gap to the clock.
+		const needed = Math.ceil(clock + 2 * (side + 10) + 24);
+		if (side > 0 && needed > statusFitWidth) setStatusFitWidth(needed);
+	});
+
+	const refreshBatteryDetails = useCallback(() => {
+		invoke<BatteryDetails>("get_battery_details")
+			.then(setBatteryDetails)
+			.catch((err) => console.error("Failed to read battery details:", err));
+	}, []);
+
 	// Battery Saver - opens settings (no public API to toggle without admin)
 	const openBatterySaverSettings = useCallback(async () => {
 		try {
@@ -2785,63 +3298,133 @@ function App() {
 		}
 	};
 
+	// Where a status tooltip card sits and how it slides in, by placement.
+	const statusTooltipMotion = (side: "below" | "left" | "right", offset: number) => {
+		if (side === "below") {
+			return {
+				style: { top: `calc(100% + ${offset}px)`, left: "50%" },
+				hidden: { opacity: 0, x: "-50%", y: -4 },
+				shown: { opacity: 1, x: "-50%", y: 0 }
+			};
+		}
+		// Top-aligned with the widget rather than centered on it: the widgets
+		// sit near the top of the screen, which would cut a centered card off.
+		const nudge = side === "right" ? -4 : 4;
+		return {
+			style: { top: -8, [side === "right" ? "left" : "right"]: `calc(100% + ${offset}px)` },
+			hidden: { opacity: 0, x: nudge, y: 0 },
+			shown: { opacity: 1, x: 0, y: 0 }
+		};
+	};
+
+	// A status widget with its tooltip card, which hangs outside the pill.
+	const statusWidget = (
+		id: string,
+		tooltip: string,
+		content: React.ReactNode,
+		onEnter?: () => void
+	) => (
+		<div
+			className="passive-feature"
+			key={id}
+			onMouseEnter={(e) => {
+				onEnter?.();
+				showStatusTooltip(id, e.currentTarget);
+			}}
+			onMouseLeave={hideStatusTooltip}
+		>
+			{content}
+			<AnimatePresence>
+				{statusTooltip?.id === id &&
+					(() => {
+						const placed = statusTooltipMotion(statusTooltip.side, statusTooltip.offset);
+						return (
+							<motion.div
+								className="status-tooltip"
+								style={placed.style}
+								initial={placed.hidden}
+								animate={placed.shown}
+								exit={placed.hidden}
+								transition={{ duration: 0.15 }}
+							>
+								{tooltip}
+							</motion.div>
+						);
+					})()}
+			</AnimatePresence>
+		</div>
+	);
+
 	// Render a status widget by ID
 	const renderStatusWidget = (id: string) => {
 		switch (id) {
 			case "weather":
 				if (!settingsWeatherEnabled || temperature === null) return null;
-				return (
-					<div
-						className="passive-feature"
-						key="weather"
-						title={cityName ? `${weatherCondition} — ${cityName}` : weatherCondition}
-					>
+				return statusWidget(
+					"weather",
+					cityName ? `${weatherCondition} — ${cityName}` : weatherCondition,
+					<>
 						<WeatherIcon size={12} strokeWidth={2.2} />
 						<span className="label">
 							{temperature}°{tempUnit === "fahrenheit" ? "F" : "C"}
 						</span>
-					</div>
+					</>
 				);
 			case "battery":
-				return (
-					<div className="passive-feature" key="battery">
+				return statusWidget(
+					"battery",
+					batteryTooltip(
+						batteryDetails,
+						{ level: batteryLevel, charging: isCharging },
+						batterySaverEnabled
+					),
+					<>
 						<BatteryIcon
 							charging={isCharging}
 							level={batteryLevel}
 							threshold={lowBatteryThreshold}
 						/>
 						<span className="label">{batteryLevel}%</span>
-					</div>
+					</>,
+					refreshBatteryDetails
 				);
 			case "cpu":
-				return (
-					<div className="passive-feature" key="cpu" title="CPU Usage">
+				return statusWidget(
+					"cpu",
+					"CPU Usage",
+					<>
 						<Cpu size={12} strokeWidth={2} />
 						<span className="label">{cpuUsage}%</span>
-					</div>
+					</>
 				);
 			case "ram":
-				return (
-					<div className="passive-feature" key="ram" title="RAM Usage">
+				return statusWidget(
+					"ram",
+					"RAM Usage",
+					<>
 						<MemoryStick size={12} strokeWidth={2} />
 						<span className="label">{Math.round(ramUsage)}%</span>
-					</div>
+					</>
 				);
 			case "disk":
-				return (
-					<div className="passive-feature" key="disk" title="Free Disk Space">
+				return statusWidget(
+					"disk",
+					"Free Disk Space",
+					<>
 						<HardDrive size={12} strokeWidth={2} />
 						<span className="label">{diskSpace}GB</span>
-					</div>
+					</>
 				);
 			case "net":
-				return (
-					<div className="passive-feature" key="net" title="Network Speed">
+				return statusWidget(
+					"net",
+					"Network Speed",
+					<>
 						<ArrowUpDown size={12} strokeWidth={2} />
 						<span className="label">
 							↑{formatBytes(netUpSpeed)} ↓{formatBytes(netDownSpeed)}
 						</span>
-					</div>
+					</>
 				);
 			case "audio":
 			case "headphones":
@@ -2899,13 +3482,13 @@ function App() {
 		if (bloomMode === "shelf") return 380;
 		if (bloomMode === "optimizer" && isOpen) return 370;
 		if (bloomMode === "command-center" && isOpen) return 350;
-		if (bloomMode === "wifi" || bloomMode === "bluetooth" || bloomMode === "system-tray" || bloomMode === "audio-output") return 360;
+		if (bloomMode === "wifi" || bloomMode === "bluetooth" || bloomMode === "system-tray" || bloomMode === "audio-output" || bloomMode === "devices") return 360;
 		if (showMusicOnStatusHover) {
 			return 170 + (settingsVisualizerEnabled ? 30 : 0);
 		}
 		if (bloomMode === "status" && isHovered) {
 			const totalWidgets = statusWidgets.left.length + statusWidgets.right.length;
-			return Math.min(200 + totalWidgets * 50, 380) - clock24hTrim;
+			return Math.max(Math.min(200 + totalWidgets * 50, 380) - clock24hTrim, statusFitWidth);
 		}
 		if (isMusicMode && isOpen) {
 			if (lyricsExpanded) return 440;
@@ -2931,6 +3514,8 @@ function App() {
 		if (bloomMode === "announcement" && announcement && !announcementDismissed) {
 			return announcement.url ? 168 : 148;
 		}
+		// Device alert: the drawing, with room for its motion.
+		if (bloomMode === "device" && deviceAlert) return 76;
 		// Sized to the calendar's week-row count plus the timer's fixed content.
 		if (bloomMode === "calendar") return calendarMonthRows >= 6 ? 305 : 273;
 		// Shelf expands on mode alone (no hover needed: there is no cursor
@@ -2942,6 +3527,9 @@ function App() {
 		}
 		if (bloomMode === "optimizer") return isOpen ? 220 : 36;
 		if (bloomMode === "command-center") return isOpen ? 230 : 36;
+		if (bloomMode === "devices") {
+			return devicesPanelHeight;
+		}
 		if (bloomMode === "wifi" || bloomMode === "bluetooth") return 300;
 		if (bloomMode === "system-tray") return 340;
 		if (bloomMode === "audio-output") return 280;
@@ -2970,6 +3558,35 @@ function App() {
 			setCompactVolumeExpanded(false);
 		}
 	}, [isHovered, mediaLayout, bloomMode]);
+
+	// The pill's target geometry: the animation springs toward it, and the
+	// window region below is cut from it, so the region is already at the
+	// final size while the pill animates.
+	const pillTargetY = !isReady ? 250 : isVisible ? (isHidden ? -100 : 0) : -150;
+	const pillTargetWidth = !isReady
+		? 34
+		: isExpanded && isVisible && !isHidden
+			? getDynamicWidth()
+			: isImpacted
+				? 39.1
+				: 30.6;
+	const pillTargetHeight = !isReady ? 34 : getDynamicHeight();
+	// Shadow and the edge flares beside the pill.
+	pillTargetRef.current = notchPillBox(
+		window.innerWidth,
+		scale,
+		pillTargetY,
+		pillTargetWidth,
+		pillTargetHeight,
+		24
+	);
+
+	// Clip the notch window to what it draws (see window_region.rs): outside
+	// these rectangles the window takes no clicks, whatever its click-through
+	// state. Sent after every render, but only when the region changes.
+	useEffect(() => {
+		if (windowLabel === "main") updateNotchRegion();
+	});
 
 	return (
 		<div className="screen" style={{ overflow: "hidden" }}>
@@ -3003,6 +3620,7 @@ function App() {
 					position: "relative"
 				}}
 			>
+				<DeviceArtDefs />
 				<motion.div
 					ref={bloomRef}
 					className={`bloom ${isHovered ? "expanded" : ""} ${isImpacted ? "is-impacted" : ""} ${isDragHovering ? "drag-hover" : ""}`}
@@ -3022,15 +3640,9 @@ function App() {
 						opacity: 0
 					}}
 					animate={{
-						y: !isReady ? 250 : isVisible ? (isHidden ? -100 : 0) : -150,
-						width: !isReady
-							? 34
-							: isExpanded && isVisible && !isHidden
-								? getDynamicWidth()
-								: isImpacted
-									? 39.1
-									: 30.6,
-						height: !isReady ? 34 : getDynamicHeight(),
+						y: pillTargetY,
+						width: pillTargetWidth,
+						height: pillTargetHeight,
 						opacity: isVisible ? 1 : 0,
 						scaleX: 1,
 						scaleY: 1,
@@ -3396,7 +4008,11 @@ function App() {
 											transition={{ duration: 0.2 }}
 											style={{ width: "100%" }}
 										>
-											<div className="main-row">
+											<div
+												className="main-row"
+												// A device alert covers the whole pill.
+												style={bloomMode === "device" || deviceAlertOnScreen ? { visibility: "hidden" } : undefined}
+											>
 												<AnimatePresence mode="wait">
 													{(showPowerPulse || showLowBatteryPulse || showUpdatePulse) &&
 													!isHovered ? (
@@ -3468,6 +4084,7 @@ function App() {
 																{!showCompactMusicIcons && isHovered && statusWidgets.left.length > 0 ? (
 																	<motion.div
 																		key="left-widgets"
+																		ref={leftWidgetsRef}
 																		className="passive-features-group"
 																		initial={{ opacity: 0 }}
 																		animate={{ opacity: 1 }}
@@ -3480,7 +4097,7 @@ function App() {
 															</div>
 
 															{/* Center - Time (always visible) */}
-															<div className="time-center">
+															<div className="time-center" ref={timeCenterRef}>
 																<AnimatePresence>
 																	{showPanelArrows && (
 																		<motion.button
@@ -3631,6 +4248,7 @@ function App() {
 																) : !showCompactMusicIcons && isHovered && (statusWidgets.right.length > 0 || activeHeadphones) ? (
 																	<motion.div
 																		key="right-widgets"
+																		ref={rightWidgetsRef}
 																		className="passive-features-group"
 																		initial={{ opacity: 0 }}
 																		animate={{ opacity: 1 }}
@@ -3735,6 +4353,27 @@ function App() {
 											transition={{ type: "spring", stiffness: 400, damping: 30 }}
 										>
 											<AudioOutputPanel onBack={() => setBloomMode("command-center")} />
+										</motion.div>
+									)}
+								</AnimatePresence>
+
+								{/* Connected devices: everything connected, with its battery, by priority */}
+								<AnimatePresence>
+									{bloomMode === "devices" && (
+										<motion.div
+											key="devices-view"
+											initial={{ opacity: 0 }}
+											animate={{ opacity: 1 }}
+											exit={{ opacity: 0, filter: "blur(4px)", transition: { duration: 0.1 } }}
+											transition={{ type: "spring", stiffness: 400, damping: 30 }}
+										>
+											<ConnectedDevicesPanel
+												data={connectedDevices}
+												height={devicesPanelHeight}
+												buds={budsById}
+												lowThreshold={lowBatteryThreshold}
+												onContentHeight={setDevicesContentHeight}
+											/>
 										</motion.div>
 									)}
 								</AnimatePresence>
@@ -3874,12 +4513,14 @@ function App() {
 											{/* Circular Actions Row */}
 											<div className="cc-circular-actions-row">
 												<button
-													className={`cc-circular-btn ${dndActive ? "active" : ""}`}
+													className="cc-circular-btn"
 													onClick={(e) => {
 														e.stopPropagation();
-														setDndActive((prev) => !prev);
+														invoke("open_app", { appName: "ms-settings:notifications" }).catch(
+															console.error
+														);
 													}}
-													title={`Focus / DND: ${dndActive ? "On" : "Off"}`}
+													title="Do Not Disturb — Open Windows notification settings"
 												>
 													<MoonIcon />
 												</button>
@@ -4143,6 +4784,55 @@ function App() {
 													</div>
 												)}
 											</div>
+										</motion.div>
+									)}
+								</AnimatePresence>
+
+								{/* Device alert: a device connected or disconnected. A
+								    click opens the Bluetooth view. */}
+								<AnimatePresence
+									// An alert arriving while the last one fades out keeps the
+									// clock row hidden.
+									onExitComplete={() => setDeviceAlertOnScreen(deviceAlertRef.current !== null)}
+								>
+									{bloomMode === "device" && deviceAlert && (
+										<motion.div
+											className="device-alert"
+											onClick={(e) => {
+												e.stopPropagation();
+												const usb = deviceAlert.usb;
+												deviceAlertQueueRef.current = [];
+												setDeviceAlert(null);
+												// Bluetooth devices open their list; USB ones
+												// have none, so the click just dismisses.
+												if (usb) return;
+												setIsOpen(true);
+												setBloomMode("bluetooth");
+											}}
+											initial={{ opacity: 0 }}
+											animate={{ opacity: 1 }}
+											exit={{ opacity: 0, filter: "blur(4px)", transition: { duration: 0.12 } }}
+											transition={{ duration: 0.2 }}
+										>
+											<DeviceArt
+												art={deviceAlert.art}
+												phase={deviceAlert.connected ? "play" : "leave"}
+												runId={deviceAlert.runId}
+												size={60}
+											/>
+											<div className="device-alert-text">
+												<span className="device-alert-name">{deviceAlert.name}</span>
+												<span className="device-alert-status">
+													{deviceAlertStatus(deviceAlert.art, deviceAlert.connected, deviceAlert.usb)}
+												</span>
+											</div>
+											{deviceAlert.connected && deviceAlert.buds ? (
+												<DeviceBudsBattery buds={deviceAlert.buds} />
+											) : (
+												deviceAlert.connected &&
+												deviceAlert.battery !== null && <DeviceBatteryRing level={deviceAlert.battery} />
+											)}
+
 										</motion.div>
 									)}
 								</AnimatePresence>

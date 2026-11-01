@@ -122,9 +122,14 @@ pub fn shelf_drag_icon() -> Option<String> {
 }
 
 #[tauri::command]
-pub async fn update_dock_rect(rect: IntRect) {
+pub async fn update_dock_rect(rect: IntRect, overlap_rect: Option<IntRect>) {
     if let Ok(mut r) = DOCK_RECT.lock() {
         *r = Some(rect);
+    }
+    if let Some(rect) = overlap_rect {
+        if let Ok(mut r) = DOCK_OVERLAP_RECT.lock() {
+            *r = Some(rect);
+        }
     }
 }
 
@@ -542,14 +547,7 @@ fn get_uwp_launch_cmd(exe_path: &str) -> Option<String> {
     None
 }
 
-/// Duplicate-event guard. Kept well below the double-click interval so a
-/// double-click still toggles twice.
-const START_TOGGLE_DEBOUNCE_MS: i64 = 80;
-/// Hold time for the Windows key so the shell registers a deliberate tap.
-/// A zero-length tap is dropped by the shell and never opens Start.
-const START_WIN_KEY_HOLD_MS: u64 = 40;
-
-fn send_key_tap(vk: windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY, hold_ms: u64) {
+fn send_key_tap(vk: windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY) {
     use windows::Win32::UI::Input::KeyboardAndMouse::{
         SendInput, INPUT, INPUT_0, KEYBDINPUT, KEYEVENTF_KEYUP,
     };
@@ -579,9 +577,6 @@ fn send_key_tap(vk: windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY, ho
     }];
     unsafe {
         SendInput(&down, std::mem::size_of::<INPUT>() as i32);
-        if hold_ms > 0 {
-            std::thread::sleep(std::time::Duration::from_millis(hold_ms));
-        }
         SendInput(&up, std::mem::size_of::<INPUT>() as i32);
     }
 }
@@ -590,7 +585,7 @@ fn send_key_tap(vk: windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY, ho
 /// Depending on the Windows build it is hosted by StartMenuExperienceHost
 /// (older) or SearchHost (Windows 11 24H2+), so match both. The dock is
 /// WS_EX_NOACTIVATE, so clicking it never steals focus from an open menu.
-fn is_start_menu_open() -> bool {
+pub fn is_start_menu_open() -> bool {
     use windows::Win32::Foundation::CloseHandle;
     use windows::Win32::System::Threading::{
         OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
@@ -628,18 +623,17 @@ fn is_start_menu_open() -> bool {
     }
 }
 
-/// Toggle the native Start menu. Checks whether the menu currently owns the
-/// foreground window instead of blindly tapping Win: rapid Win taps are ignored
-/// by the shell while the menu animates, which made a second click replay the
-/// open animation. When the menu is open it is dismissed with Escape, which is
-/// deterministic. The tiny debounce only coalesces duplicate events; it must
-/// stay well below the double-click interval so a double-click still closes.
+/// Open Start through Explorer, independently of the foreground app's integrity
+/// level. An open menu is dismissed with Escape rather than another open request.
+///
+/// Start also closes itself on the press of a click outside it, the Start
+/// button included, so by the time the click arrives the menu is often gone.
+/// The mouse hook records whether Start was open at this click's press: if it
+/// was, the press closed it and the click leaves it closed, however long the
+/// button was held.
 fn toggle_start_menu() {
-    let now = get_now_ms();
-    if now - LAST_START_TOGGLE_MS.load(Ordering::Relaxed) < START_TOGGLE_DEBOUNCE_MS {
-        return;
-    }
-    LAST_START_TOGGLE_MS.store(now, Ordering::Relaxed);
+    // Taken here, so a press is only ever used by the click it started.
+    let open_at_press = START_OPEN_AT_PRESS.swap(false, Ordering::Relaxed);
 
     tauri::async_runtime::spawn_blocking(move || {
         use windows::Win32::UI::Input::KeyboardAndMouse::VK_ESCAPE;
@@ -647,9 +641,10 @@ fn toggle_start_menu() {
             FindWindowW, PostMessageW, SC_TASKLIST, WM_SYSCOMMAND,
         };
         if is_start_menu_open() {
-            send_key_tap(VK_ESCAPE, 0);
-        } else {
-            // Ask Explorer directly via SC_TASKLIST message (instant, no key injection lag)
+send_key_tap(VK_ESCAPE);
+        } else if !open_at_press {
+            // Ask Explorer directly. SendInput can be blocked while an elevated
+            // app owns the foreground; opening Settings happened to avoid that.
             unsafe {
                 if let Ok(tray) = FindWindowW(windows::core::w!("Shell_TrayWnd"), None) {
                     let _ = PostMessageW(
@@ -658,9 +653,6 @@ fn toggle_start_menu() {
                         windows::Win32::Foundation::WPARAM(SC_TASKLIST as usize),
                         windows::Win32::Foundation::LPARAM(0),
                     );
-                } else {
-                    use windows::Win32::UI::Input::KeyboardAndMouse::VK_LWIN;
-                    send_key_tap(VK_LWIN, START_WIN_KEY_HOLD_MS);
                 }
             }
         }
@@ -785,46 +777,22 @@ fn launch_path(path: &str) {
         }
 
         use std::path::Path;
-        let mut final_path = path.to_string();
+        // AppsFolder entries of classic programs can be saved as a path under a
+        // known-folder GUID (`{7C5A40EF-…}\\Steam\\Steam.exe`), which
+        // ShellExecute cannot open. Resolve it to the real file first.
+        let mut final_path = if path.starts_with('{') {
+            crate::tray::resolve_path(path)
+                .filter(|resolved| Path::new(resolved).exists())
+                .unwrap_or_else(|| path.to_string())
+        } else {
+            path.to_string()
+        };
 
-        if !Path::new(&final_path).exists() {
-            let file_name = Path::new(&final_path)
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("")
-                .to_lowercase();
-
-            // Handle Discord/Slack style auto-updaters (app-x.x.x folder structure)
-            if file_name == "discord.exe"
-                || file_name == "slack.exe"
-                || file_name == "githubdesktop.exe"
-                || file_name == "zentwilight.exe"
-            {
-                if let Some(parent) = Path::new(&final_path).parent().and_then(|p| p.parent()) {
-                    if parent.exists() {
-                        if let Ok(entries) = std::fs::read_dir(parent) {
-                            let mut app_dirs = Vec::new();
-                            for entry in entries.flatten() {
-                                let name = entry.file_name().to_string_lossy().to_string();
-                                if (name.starts_with("app-") || name.starts_with("current"))
-                                    && entry.path().is_dir()
-                                {
-                                    app_dirs.push(entry.path());
-                                }
-                            }
-                            app_dirs.sort();
-                            if let Some(latest) = app_dirs.last() {
-                                if let Some(file_name) = Path::new(&final_path).file_name() {
-                                    let exe = latest.join(file_name);
-                                    if exe.exists() {
-                                        final_path = exe.to_string_lossy().to_string();
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+        // An app installed by Squirrel moves to a new version folder when it
+        // updates (Discord, Slack, GitHub Desktop).
+        if let Some(moved) = crate::utils::moved_squirrel_exe(&final_path) {
+            final_path = moved;
+        }
         }
 
         let wide_path: Vec<u16> = final_path
@@ -941,65 +909,205 @@ pub async fn get_active_windows() -> Vec<AppInfo> {
     .unwrap_or_default()
 }
 
+/// Where to put a window whose restore rectangle is on no screen, in screen
+/// coordinates: centered in `work`, at its own size if that is at least a
+/// third of the work area each way (shrunk to fit), otherwise at two thirds
+/// of the work area. An off-screen restore rectangle usually carries a broken
+/// size too, such as an app's minimum size.
+fn on_screen_restore_rect(
+    normal: windows::Win32::Foundation::RECT,
+    work: windows::Win32::Foundation::RECT,
+) -> windows::Win32::Foundation::RECT {
+    let work_w = work.right - work.left;
+    let work_h = work.bottom - work.top;
+    let fit = |size: i32, available: i32| {
+        if size >= available / 3 {
+            size.min(available)
+        } else {
+            available * 2 / 3
+        }
+    };
+    let w = fit(normal.right - normal.left, work_w);
+    let h = fit(normal.bottom - normal.top, work_h);
+    let left = work.left + (work_w - w) / 2;
+    let top = work.top + (work_h - h) / 2;
+    windows::Win32::Foundation::RECT {
+        left,
+        top,
+        right: left + w,
+        bottom: top + h,
+    }
+}
+
+/// Before the dock restores a minimized window: if the position Windows will
+/// restore it to lies on no monitor, move that position onto the monitor
+/// under the cursor (the dock's), so the window doesn't come back off-screen.
+/// Apps can leave the off-screen spot Windows parks minimized windows at
+/// (-32000, -32000) as their restore position, and the taskbar would restore
+/// them there too.
+unsafe fn bring_restore_position_on_screen(hwnd: HWND) {
+    use windows::Win32::Foundation::POINT;
+    use windows::Win32::Graphics::Gdi::{
+        GetMonitorInfoW, MonitorFromPoint, MonitorFromRect, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+        MONITOR_DEFAULTTONULL, MONITOR_DEFAULTTOPRIMARY,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetCursorPos, GetWindowLongW, GetWindowPlacement, SetWindowPlacement, GWL_EXSTYLE,
+        WINDOWPLACEMENT, WS_EX_TOOLWINDOW,
+    };
+
+    let mut placement = WINDOWPLACEMENT {
+        length: std::mem::size_of::<WINDOWPLACEMENT>() as u32,
+        ..Default::default()
+    };
+    if GetWindowPlacement(hwnd, &mut placement).is_err() {
+        return;
+    }
+
+    let monitor_info = |monitor| {
+        let mut info = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        GetMonitorInfoW(monitor, &mut info)
+            .as_bool()
+            .then_some(info)
+    };
+    // The restore rectangle is in workspace coordinates, which are offset by
+    // the work area of the monitor it belongs to, unless the window is a tool
+    // window. An off-screen rectangle has no monitor; the nearest one is it.
+    let tool_window = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32 & WS_EX_TOOLWINDOW.0 != 0;
+    let normal = placement.rcNormalPosition;
+    let Some(source) = monitor_info(MonitorFromRect(&normal, MONITOR_DEFAULTTONEAREST)) else {
+        return;
+    };
+    let source_offset = workspace_offset(&source, tool_window);
+    let on_screen = shift_rect(normal, source_offset);
+    if !MonitorFromRect(&on_screen, MONITOR_DEFAULTTONULL).is_invalid() {
+        return;
+    }
+
+    let mut cursor = POINT::default();
+    let _ = GetCursorPos(&mut cursor);
+    let Some(target) = monitor_info(MonitorFromPoint(cursor, MONITOR_DEFAULTTOPRIMARY)) else {
+        return;
+    };
+    placement.rcNormalPosition = restore_rect_on_monitor(on_screen, &target, tool_window);
+    let _ = SetWindowPlacement(hwnd, &placement);
+}
+
+/// How far `monitor`'s work area is inset from its top-left corner: what
+/// separates screen from workspace coordinates on it. Tool windows use
+/// screen coordinates, so none.
+fn workspace_offset(
+    monitor: &windows::Win32::Graphics::Gdi::MONITORINFO,
+    tool_window: bool,
+) -> (i32, i32) {
+    if tool_window {
+        (0, 0)
+    } else {
+        (
+            monitor.rcWork.left - monitor.rcMonitor.left,
+            monitor.rcWork.top - monitor.rcMonitor.top,
+        )
+    }
+}
+
+fn shift_rect(
+    rect: windows::Win32::Foundation::RECT,
+    (dx, dy): (i32, i32),
+) -> windows::Win32::Foundation::RECT {
+    windows::Win32::Foundation::RECT {
+        left: rect.left + dx,
+        top: rect.top + dy,
+        right: rect.right + dx,
+        bottom: rect.bottom + dy,
+    }
+}
+
+/// The restore rectangle, in the target monitor's workspace coordinates, that
+/// centers a window (sized from its screen rectangle `on_screen`) in that
+/// monitor's work area.
+fn restore_rect_on_monitor(
+    on_screen: windows::Win32::Foundation::RECT,
+    target: &windows::Win32::Graphics::Gdi::MONITORINFO,
+    tool_window: bool,
+) -> windows::Win32::Foundation::RECT {
+    let (dx, dy) = workspace_offset(target, tool_window);
+    shift_rect(on_screen_restore_rect(on_screen, target.rcWork), (-dx, -dy))
+}
+
+/// The window outside Bloom that most recently became the foreground window.
+fn last_focused_window() -> Option<HWND> {
+    let map = crate::state::FOCUS_TIMESTAMPS.get()?.lock().ok()?;
+    let (&last, _) = map.iter().max_by_key(|(_, &at)| at)?;
+    let last = HWND(last as *mut _);
+    unsafe { windows::Win32::UI::WindowsAndMessaging::IsWindow(Some(last)) }
+        .as_bool()
+        .then_some(last)
+}
+
 #[tauri::command]
-pub async fn focus_window(hwnd: isize) {
+pub async fn focus_window(app: AppHandle, hwnd: isize) -> bool {
+    let dock = app
+        .get_webview_window("dock")
+        .and_then(|window| window.hwnd().ok())
+        .map(|dock| dock.0 as isize);
     tauri::async_runtime::spawn_blocking(move || unsafe {
         use windows::Win32::UI::WindowsAndMessaging::{
-            GetForegroundWindow, GetWindowThreadProcessId, IsIconic, IsWindowVisible,
-            SetForegroundWindow, ShowWindow, SW_MINIMIZE, SW_RESTORE, SW_SHOW,
+            BringWindowToTop, FlashWindow, GetAncestor, GetForegroundWindow, IsIconic, IsWindow,
+            IsWindowVisible, SetForegroundWindow, ShowWindow, GA_ROOTOWNER, SW_MINIMIZE,
+            SW_RESTORE, SW_SHOW,
         };
         let hwnd = HWND(hwnd as *mut _);
-        let my_pid = std::process::id();
+        if !IsWindow(Some(hwnd)).as_bool() {
+            return false;
+        }
+
+        // A second click toggles only this exact foreground window. Another
+        // window from the same process (or a recently focused target) is not
+        // grounds to minimize it. A popup or dialog the window owns (a WinUI
+        // flyout, a Save dialog) counts as the window itself, as on the taskbar.
+        let mut foreground = GetForegroundWindow();
+        // Clicking the dock can make it the foreground window for a moment.
+        // The window in front is then the one focused last before the click.
+        if dock == Some(foreground.0 as isize) {
+            if let Some(last) = last_focused_window() {
+                foreground = last;
+            }
+        }
+        if (foreground == hwnd || GetAncestor(foreground, GA_ROOTOWNER) == hwnd)
+            && IsWindowVisible(hwnd).as_bool()
+            && !IsIconic(hwnd).as_bool()
+        {
+            let _ = ShowWindow(hwnd, SW_MINIMIZE);
+            return IsIconic(hwnd).as_bool();
+        }
 
         if !IsWindowVisible(hwnd).as_bool() {
             let _ = ShowWindow(hwnd, SW_SHOW);
-            let _ = ShowWindow(hwnd, SW_RESTORE);
-            let _ = SetForegroundWindow(hwnd);
-        } else if IsIconic(hwnd).as_bool() {
-            let _ = ShowWindow(hwnd, SW_RESTORE);
-            let _ = SetForegroundWindow(hwnd);
-        } else {
-            // Minimize if: window is foreground, OR same process as foreground (not Bloom), OR recently focused
-            let fg = GetForegroundWindow();
-            let mut should_minimize = false;
-
-            if !fg.is_invalid() && fg == hwnd {
-                should_minimize = true;
-            } else if !fg.is_invalid() {
-                let mut fg_pid = 0u32;
-                let mut target_pid = 0u32;
-                GetWindowThreadProcessId(fg, Some(&mut fg_pid));
-                GetWindowThreadProcessId(hwnd, Some(&mut target_pid));
-                if fg_pid == target_pid && fg_pid != 0 && fg_pid != my_pid {
-                    should_minimize = true;
-                }
-            }
-
-            if !should_minimize {
-                let now = crate::utils::get_now_ms();
-                should_minimize = if let Some(map) = crate::state::FOCUS_TIMESTAMPS.get() {
-                    if let Ok(guard) = map.lock() {
-                        guard
-                            .get(&(hwnd.0 as *mut () as isize))
-                            .map(|ts| now - ts < 2000)
-                            .unwrap_or(false)
-                    } else {
-                        false
-                    }
-                } else {
-                    false
-                };
-            }
-
-            if should_minimize {
-                let _ = ShowWindow(hwnd, SW_MINIMIZE);
-            } else {
-                let _ = SetForegroundWindow(hwnd);
-            }
         }
+        if IsIconic(hwnd).as_bool() {
+            bring_restore_position_on_screen(hwnd);
+            let _ = ShowWindow(hwnd, SW_RESTORE);
+        }
+
+        if SetForegroundWindow(hwnd).as_bool() && GetForegroundWindow() == hwnd {
+            return true;
+        }
+        // Foreground activation is restricted by Windows. Uncover the window,
+        // retry once, then request attention instead of silently claiming focus.
+        let _ = BringWindowToTop(hwnd);
+        if GetForegroundWindow() == hwnd
+            || (SetForegroundWindow(hwnd).as_bool() && GetForegroundWindow() == hwnd)
+        {
+            return true;
+        }
+        let _ = FlashWindow(hwnd, true);
+        false
     })
     .await
-    .unwrap_or_default();
+    .unwrap_or(false)
 }
 
 /// Brings one window of a multi-window dock item forward, like the taskbar's
@@ -1030,6 +1138,7 @@ pub async fn focus_app_windows(hwnds: Vec<isize>) {
             let _ = ShowWindow(hwnd, SW_SHOW);
         }
         if IsIconic(hwnd).as_bool() {
+            bring_restore_position_on_screen(hwnd);
             let _ = ShowWindow(hwnd, SW_RESTORE);
         }
         let _ = SetForegroundWindow(hwnd);
@@ -1590,6 +1699,12 @@ pub async fn get_app_icon(
             path = resolved;
         }
     }
+    // A pin to a Squirrel app (Discord, Slack) can point at a version folder
+    // its updater has since deleted. The icon was cached under that path, so
+    // this only shows once the cache is cleared; take the current version's.
+    if let Some(moved) = crate::utils::moved_squirrel_exe(&path) {
+        path = moved;
+    }
 
     // Strategy 2: Shell-resolved app icons (Store/UWP/PWA packages) and executables
     // inside an MSIX package. Neither has a usable icon on disk; the shell resolves
@@ -1796,10 +1911,16 @@ pub fn save_pinned_apps(app: AppHandle, apps: Vec<AppInfo>) -> Result<(), String
         .map_err(|e| e.to_string())?
         .join("pinned_apps.json");
     if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let _guard = PINNED_FILE_LOCK.lock().map_err(|e| e.to_string())?;
+    if path.exists() {
+        let old = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+        serde_json::from_str::<Vec<AppInfo>>(&old)
+            .map_err(|e| format!("Pinned apps file is invalid; refusing to overwrite it: {e}"))?;
     }
     let content = serde_json::to_string(&apps).map_err(|e| e.to_string())?;
-    std::fs::write(path, content).map_err(|e| e.to_string())?;
+    crate::utils::atomic_write_file(&path, content.as_bytes())?;
     Ok(())
 }
 
@@ -2063,31 +2184,55 @@ pub async fn get_installed_apps() -> Vec<AppInfo> {
 #[tauri::command]
 pub fn hide_native_osd() {
     unsafe {
-        use windows::Win32::UI::WindowsAndMessaging::{FindWindowA, ShowWindow, SW_HIDE};
+        use windows::Win32::UI::WindowsAndMessaging::{
+            FindWindowA, IsWindowVisible, ShowWindow, SW_HIDE,
+        };
         let class1 = windows::core::PCSTR(c"NativeHWNDHost".as_ptr() as *const u8);
         if let Ok(hwnd) = FindWindowA(class1, windows::core::PCSTR::null()) {
-            let _ = ShowWindow(hwnd, SW_HIDE);
+            if IsWindowVisible(hwnd).as_bool() {
+                let _ = ShowWindow(hwnd, SW_HIDE);
+            }
         }
     }
 }
 
 #[tauri::command]
 pub fn open_settings_window(app: AppHandle) {
-    if let Some(win) = app.get_webview_window("settings") {
-        let _ = win.show();
-        let _ = win.unminimize();
-        let _ = win.set_focus();
-        if let Ok(hwnd) = win.hwnd() {
-            unsafe {
-                use windows::Win32::UI::WindowsAndMessaging::{
-                    SetForegroundWindow, ShowWindow, SW_RESTORE, SW_SHOW,
-                };
-                let _ = ShowWindow(hwnd, SW_SHOW);
-                let _ = ShowWindow(hwnd, SW_RESTORE);
-                let _ = SetForegroundWindow(hwnd);
+    // WebView2 creation must run off the Windows UI thread, including tray callbacks.
+    tauri::async_runtime::spawn_blocking(move || {
+        let result = crate::settings_window::with_window(&app, |win, created| {
+            if SHUTTING_DOWN.load(Ordering::Relaxed) {
+                return;
             }
+            if created {
+                let _ = window_vibrancy::apply_mica(win, None);
+                crate::services::watch_webview_process(&app, win);
+            }
+            let _ = win.show();
+            let _ = win.unminimize();
+            let _ = win.set_focus();
+            if let Ok(hwnd) = win.hwnd() {
+                unsafe {
+                    use windows::Win32::UI::WindowsAndMessaging::{
+                        SetForegroundWindow, ShowWindow, SW_RESTORE, SW_SHOW,
+                    };
+                    let _ = ShowWindow(hwnd, SW_SHOW);
+                    let _ = ShowWindow(hwnd, SW_RESTORE);
+                    let _ = SetForegroundWindow(hwnd);
+                }
+            }
+        });
+        if let Err(error) = result {
+            eprintln!("Failed to open Bloom settings: {error}");
         }
-    }
+    });
+}
+
+#[tauri::command]
+pub async fn close_settings_window(app: AppHandle) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || crate::settings_window::close(&app))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -2901,19 +3046,18 @@ pub fn clear_volume_mixer_rect() {
 /// Unregisters the notch and dock AppBars so Windows gives their work area back.
 pub fn release_appbars(handle: &AppHandle) {
     if let Some(w) = handle.get_webview_window("main") {
-        if MAIN_APPBAR_REGISTERED.load(Ordering::Relaxed) {
-            if let Ok(hwnd) = w.hwnd() {
-                unregister_appbar_native(hwnd);
-            }
+        if let Ok(hwnd) = w.hwnd() {
+            unregister_appbar_native(hwnd);
         }
     }
     if let Some(w) = handle.get_webview_window("dock") {
-        if DOCK_APPBAR_REGISTERED.load(Ordering::Relaxed) {
-            if let Ok(hwnd) = w.hwnd() {
-                unregister_appbar_native(hwnd);
-            }
+        if let Ok(hwnd) = w.hwnd() {
+            unregister_appbar_native(hwnd);
+        }
         }
     }
+    MAIN_APPBAR_REGISTERED.store(false, Ordering::Relaxed);
+    DOCK_APPBAR_REGISTERED.store(false, Ordering::Relaxed);
 }
 
 /// Restore the native taskbar, unregister Bloom's appbars, and exit gracefully.
@@ -2921,6 +3065,7 @@ pub fn release_appbars(handle: &AppHandle) {
 /// handlers so that any shutdown path (including Task Manager's WM_CLOSE) behaves
 /// identically.
 pub fn restore_taskbar_and_exit(handle: &AppHandle) {
+    crate::diagnostics::record("shutdown", "restoring taskbar and releasing AppBars");
     SHUTTING_DOWN.store(true, Ordering::Relaxed);
     release_appbars(handle);
     set_taskbar_visibility(true, true);
@@ -2942,17 +3087,9 @@ pub async fn quit_bloom(handle: AppHandle) {
 
 #[tauri::command]
 pub async fn restart_bloom(handle: AppHandle) {
+    crate::diagnostics::record("restart", "restoring taskbar and releasing AppBars");
     SHUTTING_DOWN.store(true, Ordering::Relaxed);
-    if let Some(w) = handle.get_webview_window("main") {
-        if let Ok(hwnd) = w.hwnd() {
-            unregister_appbar_native(hwnd);
-        }
-    }
-    if let Some(w) = handle.get_webview_window("dock") {
-        if let Ok(hwnd) = w.hwnd() {
-            unregister_appbar_native(hwnd);
-        }
-    }
+    release_appbars(&handle);
     if let Some(w) = handle.get_webview_window("settings") {
         let _ = w.destroy();
     }
@@ -3089,27 +3226,24 @@ fn re_register_appbars(app: &AppHandle, settings: &HashMap<String, serde_json::V
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn save_setting(app: AppHandle, key: String, value: serde_json::Value) -> Result<(), String> {
+    // Async command workers must emit in commit order: a later save must not
+    // broadcast before an earlier one and leave windows on an older value.
+    static SAVE_COMMAND_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _save_guard = SAVE_COMMAND_LOCK.lock().map_err(|e| e.to_string())?;
     let path = app
         .path()
         .app_config_dir()
         .map_err(|e| e.to_string())?
         .join("settings.json");
     if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
-    let mut settings = HashMap::new();
-    if let Ok(content) = std::fs::read_to_string(&path) {
-        if let Ok(existing) = serde_json::from_str::<HashMap<String, serde_json::Value>>(&content) {
-            settings = existing;
-        }
-    }
-    settings.insert(key.clone(), value);
-    let content = serde_json::to_string(&settings).map_err(|e| e.to_string())?;
-    std::fs::write(path, content).map_err(|e| e.to_string())?;
-
-    crate::utils::replace_settings_cache(settings.clone());
+    let settings = crate::utils::save_setting_file(&path, key.clone(), value).map_err(|error| {
+        crate::diagnostics::record("settings_save_failed", &format!("key={key} error={error}"));
+        error
+    })?;
 
     // Broadcast so all windows sync — emit the key as-is (bloom-prefixed)
     let _ = app.emit(
@@ -3129,25 +3263,17 @@ pub fn load_settings(app: AppHandle) -> Result<HashMap<String, serde_json::Value
         Ok(p) => p.join("settings.json"),
         Err(_) => return Ok(HashMap::new()),
     };
-    if let Ok(content) = std::fs::read_to_string(path) {
-        if let Ok(settings) = serde_json::from_str(&content) {
-            return Ok(settings);
-        }
-    }
-    Ok(HashMap::new())
+    crate::utils::read_settings_file(&path)
 }
 
 /// Whether settings.json exists and parses, which load_settings can't tell
 /// apart from a missing file since both load as an empty map.
 #[tauri::command]
 pub fn settings_file_readable(app: AppHandle) -> bool {
-    app.path()
-        .app_config_dir()
-        .ok()
-        .and_then(|dir| std::fs::read_to_string(dir.join("settings.json")).ok())
-        .is_some_and(|content| {
-            serde_json::from_str::<HashMap<String, serde_json::Value>>(&content).is_ok()
-        })
+    app.path().app_config_dir().ok().is_some_and(|dir| {
+        let path = dir.join("settings.json");
+        path.exists() && crate::utils::read_settings_file(&path).is_ok()
+    })
 }
 
 #[tauri::command]
@@ -3194,16 +3320,7 @@ pub async fn capture_window_thumbnail(
         let result = crate::utils::capture_hwnd_to_base64(hwnd, max_width, max_height);
 
         if let Some(ref img) = result {
-            if let Some(cache) = crate::state::THUMBNAIL_CACHE.get() {
-                if let Ok(mut guard) = cache.lock() {
-                    guard.insert(hwnd_key, (img.clone(), crate::utils::get_now_ms()));
-                    // Prune dead windows if cache size exceeds 15
-                    // Minimized windows (IsWindow == true) are kept intact
-                    if guard.len() > 15 {
-                        guard.retain(|&k, _| IsWindow(Some(HWND(k as *mut _))).as_bool());
-                    }
-                }
-            }
+            crate::services::cache_thumbnail(hwnd_key, img.clone());
         }
 
         result.map(|img| (img, focus_time))
@@ -3547,61 +3664,55 @@ pub fn get_disk_space() -> Result<u64, String> {
 
 #[tauri::command]
 pub fn get_network_speed() -> Result<(u64, u64), String> {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static LAST_BYTES_SENT: AtomicU64 = AtomicU64::new(0);
-    static LAST_BYTES_RECV: AtomicU64 = AtomicU64::new(0);
-    static LAST_CHECK: AtomicU64 = AtomicU64::new(0);
-
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64;
-
-    let last_check = LAST_CHECK.load(Ordering::Relaxed);
-    let elapsed = if last_check > 0 {
-        (now - last_check).max(1)
-    } else {
-        1000
-    };
+    use std::sync::{Mutex, OnceLock};
+    use std::time::Instant;
+    static LAST_SAMPLE: OnceLock<Mutex<Option<(Instant, u64, u64)>>> = OnceLock::new();
 
     let (mut total_in, mut total_out) = (0u64, 0u64);
     unsafe {
-        let mut table_ptr: *mut windows::Win32::NetworkManagement::IpHelper::MIB_IF_TABLE2 =
-            std::ptr::null_mut();
-        let ret = windows::Win32::NetworkManagement::IpHelper::GetIfTable2(&mut table_ptr);
-        if ret.is_ok() && !table_ptr.is_null() {
-            let table = &*table_ptr;
-            let num_entries = table.NumEntries;
-            let rows = table.Table.as_ptr();
-            for i in 0..num_entries as usize {
-                let row = &*rows.add(i);
-                total_in += row.InOctets;
-                total_out += row.OutOctets;
-            }
-            windows::Win32::NetworkManagement::IpHelper::FreeMibTable(table_ptr as *const _);
+        // GetIfTable2 allocates the table and writes its address here.
+        let mut out = std::mem::MaybeUninit::<
+            *mut windows::Win32::NetworkManagement::IpHelper::MIB_IF_TABLE2,
+        >::uninit();
+        let ret = windows::Win32::NetworkManagement::IpHelper::GetIfTable2(out.as_mut_ptr());
+        if !ret.is_ok() {
+            return Err(format!("GetIfTable2 failed: {ret:?}"));
         }
+        let Some(table) = std::ptr::NonNull::new(out.assume_init()) else {
+            return Err("GetIfTable2 returned no table".to_string());
+        };
+        let table_ptr = table.as_ptr();
+        // `Table` is declared with one element but holds `NumEntries` rows, so
+        // read them through a pointer to the whole allocation, not the array.
+        let rows = std::slice::from_raw_parts(
+            std::ptr::addr_of!((*table_ptr).Table)
+                .cast::<windows::Win32::NetworkManagement::IpHelper::MIB_IF_ROW2>(),
+            table.as_ref().NumEntries as usize,
+        );
+        for row in rows {
+            total_in = total_in.saturating_add(row.InOctets);
+            total_out = total_out.saturating_add(row.OutOctets);
+        }
+        windows::Win32::NetworkManagement::IpHelper::FreeMibTable(table_ptr as *const _);
     }
 
-    let prev_sent = LAST_BYTES_SENT.swap(total_out, Ordering::Relaxed);
-    let prev_recv = LAST_BYTES_RECV.swap(total_in, Ordering::Relaxed);
-    LAST_CHECK.store(now, Ordering::Relaxed);
-
-    if last_check == 0 {
-        return Ok((0, 0));
-    }
-
-    let sent_per_sec = if total_out > prev_sent {
-        ((total_out - prev_sent) * 1000) / elapsed
+    let now = Instant::now();
+    let mut last = LAST_SAMPLE
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .map_err(|e| e.to_string())?;
+    let speed = if let Some((previous, sent, recv)) = *last {
+        let elapsed_ms = now.duration_since(previous).as_millis().max(1);
+        let rate = |current: u64, previous: u64| {
+            ((current.saturating_sub(previous) as u128 * 1000) / elapsed_ms).min(u64::MAX as u128)
+                as u64
+        };
+        (rate(total_out, sent), rate(total_in, recv))
     } else {
-        0
+        (0, 0)
     };
-    let recv_per_sec = if total_in > prev_recv {
-        ((total_in - prev_recv) * 1000) / elapsed
-    } else {
-        0
-    };
-
-    Ok((sent_per_sec, recv_per_sec))
+    *last = Some((now, total_out, total_in));
+    Ok(speed)
 }
 
 #[tauri::command]
@@ -3698,37 +3809,112 @@ pub fn get_system_accent_color() -> Result<String, String> {
     }
 }
 
+/// Export and import both pick their file in a native dialog opened from
+/// Rust, so the path a webview can influence never reaches the filesystem
+/// commands. A script injection in any Bloom window would otherwise turn
+/// these into arbitrary file read/write as the user.
 #[tauri::command]
-pub fn export_settings(app: AppHandle) -> Result<String, String> {
-    let path = app
+pub async fn export_settings_to_file(
+    app: AppHandle,
+    window: Window,
+) -> Result<Option<String>, String> {
+    if window.label() != "settings" {
+        return Err("Settings export is only available from the Settings window".into());
+    }
+    let source = app
         .path()
         .app_config_dir()
         .map_err(|e| e.to_string())?
         .join("settings.json");
-    if let Ok(content) = std::fs::read_to_string(&path) {
-        // Validate it's valid JSON before returning
-        let _settings: HashMap<String, serde_json::Value> =
-            serde_json::from_str(&content).map_err(|e| format!("Invalid settings file: {}", e))?;
-        Ok(content)
-    } else {
-        Err("No settings file found".into())
+    if !source.exists() {
+        return Err("No settings file found".into());
     }
+    let content = std::fs::read_to_string(&source).map_err(|e| e.to_string())?;
+    // Validate it's valid JSON before offering it for export.
+    crate::utils::read_settings_file(&source)?;
+
+    let picked = tauri::async_runtime::spawn_blocking(move || {
+        use tauri_plugin_dialog::DialogExt;
+        app.dialog()
+            .file()
+            .set_parent(&window)
+            .set_title("Export Bloom Settings")
+            .set_file_name("bloom-settings.json")
+            .add_filter("JSON", &["json"])
+            .blocking_save_file()
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+
+    let Some(file_path) = picked else {
+        return Ok(None);
+    };
+    let path = file_path.into_path().map_err(|e| e.to_string())?;
+    std::fs::write(&path, content).map_err(|e| format!("Failed to write file: {}", e))?;
+    Ok(Some(path.to_string_lossy().into_owned()))
 }
 
 #[tauri::command]
-pub fn read_settings_from_path(path: String) -> Result<String, String> {
-    std::fs::read_to_string(&path).map_err(|e| format!("Failed to read file: {}", e))
+pub async fn import_settings_from_file(
+    app: AppHandle,
+    window: Window,
+) -> Result<Option<String>, String> {
+    if window.label() != "settings" {
+        return Err("Settings import is only available from the Settings window".into());
+    }
+    let picked = tauri::async_runtime::spawn_blocking({
+        let app = app.clone();
+        move || {
+            use tauri_plugin_dialog::DialogExt;
+            app.dialog()
+                .file()
+                .set_parent(&window)
+                .set_title("Import Bloom Settings")
+                .add_filter("JSON", &["json"])
+                .blocking_pick_file()
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+
+    let Some(file_path) = picked else {
+        return Ok(None);
+    };
+    let path = file_path.into_path().map_err(|e| e.to_string())?;
+    let file = std::fs::File::open(&path).map_err(|e| format!("Failed to open file: {}", e))?;
+    let size = file
+        .metadata()
+        .map_err(|e| format!("Failed to inspect file: {}", e))?
+        .len();
+    if size > MAX_SETTINGS_IMPORT_BYTES {
+        return Err("Settings file exceeds the 1 MiB import limit".into());
+    }
+    let content = read_settings_import(file)?;
+    apply_imported_settings(&app, &content)?;
+    Ok(Some(path.to_string_lossy().into_owned()))
 }
 
-#[tauri::command]
-pub fn write_settings_to_path(path: String, content: String) -> Result<(), String> {
-    std::fs::write(&path, content).map_err(|e| format!("Failed to write file: {}", e))
+const MAX_SETTINGS_IMPORT_BYTES: u64 = 1024 * 1024;
+
+fn read_settings_import(reader: impl std::io::Read) -> Result<String, String> {
+    use std::io::Read;
+
+    // Bound the read as well as checking metadata, in case the file grows.
+    let mut bytes = Vec::new();
+    reader
+        .take(MAX_SETTINGS_IMPORT_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("Failed to read file: {}", e))?;
+    if bytes.len() as u64 > MAX_SETTINGS_IMPORT_BYTES {
+        return Err("Settings file exceeds the 1 MiB import limit".into());
+    }
+    String::from_utf8(bytes).map_err(|e| format!("Settings file is not valid UTF-8: {}", e))
 }
 
-#[tauri::command]
-pub fn import_settings(app: AppHandle, settings: String) -> Result<(), String> {
+fn apply_imported_settings(app: &AppHandle, settings: &str) -> Result<(), String> {
     let imported: HashMap<String, serde_json::Value> =
-        serde_json::from_str(&settings).map_err(|e| format!("Invalid JSON: {}", e))?;
+        serde_json::from_str(settings.trim_start_matches('\u{feff}'))
+            .map_err(|e| format!("Invalid JSON: {}", e))?;
 
     let path = app
         .path()
@@ -3736,17 +3922,13 @@ pub fn import_settings(app: AppHandle, settings: String) -> Result<(), String> {
         .map_err(|e| e.to_string())?
         .join("settings.json");
     if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
-    let previous: HashMap<String, serde_json::Value> = std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|content| serde_json::from_str(&content).ok())
-        .unwrap_or_default();
-
-    let content = serde_json::to_string_pretty(&imported).map_err(|e| e.to_string())?;
-    std::fs::write(&path, content).map_err(|e| e.to_string())?;
-
+    let _guard = SETTINGS_FILE_LOCK.lock().map_err(|e| e.to_string())?;
+    let previous = crate::utils::read_settings_file(&path)?;
+    crate::utils::write_settings_file(&path, &imported)?;
     crate::utils::replace_settings_cache(imported.clone());
+    drop(_guard);
 
     // Broadcast changes for every imported key so all windows re-sync
     for (key, value) in &imported {
@@ -3770,7 +3952,7 @@ pub fn import_settings(app: AppHandle, settings: String) -> Result<(), String> {
     }
 
     if imported.get("bloom-scale").is_some() {
-        re_register_appbars(&app, &imported);
+        re_register_appbars(app, &imported);
     }
 
     Ok(())
@@ -3784,7 +3966,7 @@ pub fn reset_settings(app: AppHandle) -> Result<(), String> {
         .map_err(|e| e.to_string())?
         .join("settings.json");
     if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
 
     // Keep non-Bloom keys (the file is user-editable) and the first-run/version
@@ -3792,10 +3974,8 @@ pub fn reset_settings(app: AppHandle) -> Result<(), String> {
     // replaying the splash after a reset). Everything else falls back to
     // defaults in both the backend and the frontends.
     let keep = ["bloom-first-run", "bloom-app-version"];
-    let mut settings: HashMap<String, serde_json::Value> = std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|content| serde_json::from_str(&content).ok())
-        .unwrap_or_default();
+    let _guard = SETTINGS_FILE_LOCK.lock().map_err(|e| e.to_string())?;
+    let mut settings = crate::utils::read_settings_file(&path)?;
     let removed: Vec<String> = settings
         .keys()
         .filter(|key| key.starts_with("bloom-") && !keep.contains(&key.as_str()))
@@ -3805,9 +3985,9 @@ pub fn reset_settings(app: AppHandle) -> Result<(), String> {
         settings.remove(key);
     }
 
-    let content = serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())?;
-    std::fs::write(&path, content).map_err(|e| e.to_string())?;
+    crate::utils::write_settings_file(&path, &settings)?;
     crate::utils::replace_settings_cache(settings);
+    drop(_guard);
 
     // Mirror the external-edit watcher so every open window drops the removed
     // keys from localStorage. The caller restarts Bloom right after, but this
@@ -3837,10 +4017,8 @@ pub fn setup_settings_watcher(app: AppHandle) {
         use windows::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
         use windows::Win32::Storage::FileSystem::{
             CreateFileW, ReadDirectoryChangesW, FILE_FLAG_BACKUP_SEMANTICS, FILE_LIST_DIRECTORY,
-            FILE_NOTIFY_CHANGE_LAST_WRITE, OPEN_EXISTING,
+            FILE_NOTIFY_CHANGE_FILE_NAME, FILE_NOTIFY_CHANGE_LAST_WRITE, OPEN_EXISTING,
         };
-        use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject, INFINITE};
-        use windows::Win32::System::IO::OVERLAPPED;
 
         unsafe {
             let dir_path: Vec<u16> = config_dir
@@ -3864,28 +4042,19 @@ pub fn setup_settings_watcher(app: AppHandle) {
                 _ => return,
             };
 
-            let h_event = match CreateEventW(None, false, false, None) {
-                Ok(e) => e,
-                Err(_) => {
-                    let _ = CloseHandle(dir_handle);
-                    return;
-                }
-            };
-
-            let mut notify_buffer = [0u8; 4096];
+            // ReadDirectoryChangesW requires DWORD-aligned storage.
+            let mut notify_buffer = [0u32; 1024];
             let mut bytes_returned = 0u32;
-            let mut overlapped = OVERLAPPED::default();
-            overlapped.hEvent = h_event;
 
             loop {
                 let success = ReadDirectoryChangesW(
                     dir_handle,
                     notify_buffer.as_mut_ptr() as *mut _,
-                    notify_buffer.len() as u32,
+                    std::mem::size_of_val(&notify_buffer) as u32,
                     false,
-                    FILE_NOTIFY_CHANGE_LAST_WRITE,
+                    FILE_NOTIFY_CHANGE_LAST_WRITE | FILE_NOTIFY_CHANGE_FILE_NAME,
                     Some(&mut bytes_returned),
-                    Some(&mut overlapped),
+                    None,
                     None,
                 );
 
@@ -3893,16 +4062,21 @@ pub fn setup_settings_watcher(app: AppHandle) {
                     break;
                 }
 
-                WaitForSingleObject(h_event, INFINITE);
-
+                // The directory was opened synchronously: ReadDirectoryChangesW
+                // already waited. An OVERLAPPED event on this handle is ignored
+                // and waiting on it would stall the watcher after its first change.
                 std::thread::sleep(std::time::Duration::from_millis(200));
 
-                if let Ok(new_content) = std::fs::read_to_string(&settings_path) {
-                    if let Ok(new_settings) =
-                        serde_json::from_str::<HashMap<String, serde_json::Value>>(&new_content)
-                    {
-                        // Collect diffs while holding the lock, then drop before emitting
-                        let (changed, removed) = {
+                // Keep the file read and cache comparison in the same
+                // transaction as writes from the four webviews. Otherwise a
+                // delayed watcher read can roll the cache back after a save.
+                let changes = {
+                    let Ok(_file_guard) = SETTINGS_FILE_LOCK.lock() else {
+                        continue;
+                    };
+                    crate::utils::read_settings_file(&settings_path)
+                        .ok()
+                        .map(|new_settings| {
                             let mut cache = crate::state::SETTINGS_CACHE
                                 .get_or_init(|| std::sync::Mutex::new(HashMap::new()))
                                 .lock()
@@ -3923,28 +4097,160 @@ pub fn setup_settings_watcher(app: AppHandle) {
 
                             *cache = new_settings.clone();
                             (changed, removed)
-                        };
-                        // Lock dropped — safe to emit without blocking save_setting
-                        for (key, value) in &changed {
-                            let _ = app.emit(
-                                "settings-external-changed",
-                                serde_json::json!({ "key": key, "value": value }),
-                            );
-                        }
-                        for key in removed {
-                            let _ = app.emit(
-                                "settings-external-changed",
-                                serde_json::json!({ "key": key, "value": null }),
-                            );
-                        }
+                        })
+                };
+                if let Some((changed, removed)) = changes {
+                    // Both file and cache locks are released before emitting.
+                    for (key, value) in &changed {
+                        let _ = app.emit(
+                            "settings-external-changed",
+                            serde_json::json!({ "key": key, "value": value }),
+                        );
+                    }
+                    for key in removed {
+                        let _ = app.emit(
+                            "settings-external-changed",
+                            serde_json::json!({ "key": key, "value": null }),
+                        );
                     }
                 }
             }
 
-            let _ = CloseHandle(h_event);
             let _ = CloseHandle(dir_handle);
         }
     });
+}
+
+#[cfg(test)]
+mod settings_import_tests {
+    use super::{read_settings_import, MAX_SETTINGS_IMPORT_BYTES};
+    use std::io::{Cursor, Read};
+
+    #[test]
+    fn accepts_utf8_settings_at_the_size_limit() {
+        let mut content = String::from("{\"bloom-weather-city\":\"Montréal\"}");
+        content.extend(std::iter::repeat_n(
+            ' ',
+            MAX_SETTINGS_IMPORT_BYTES as usize - content.len(),
+        ));
+        assert_eq!(read_settings_import(content.as_bytes()).unwrap(), content);
+    }
+
+    #[test]
+    fn rejects_oversized_input_without_reading_the_rest() {
+        let mut reader = Cursor::new(vec![b' '; MAX_SETTINGS_IMPORT_BYTES as usize + 100]);
+        let error = read_settings_import(&mut reader).unwrap_err();
+        assert!(error.contains("1 MiB"));
+        assert_eq!(reader.position(), MAX_SETTINGS_IMPORT_BYTES + 1);
+    }
+
+    #[test]
+    fn rejects_invalid_utf8_and_read_errors() {
+        assert!(read_settings_import(&[0xff][..])
+            .unwrap_err()
+            .contains("UTF-8"));
+        struct FailedReader;
+        impl Read for FailedReader {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("read failed"))
+            }
+        }
+        assert!(read_settings_import(FailedReader)
+            .unwrap_err()
+            .contains("read failed"));
+    }
+}
+
+#[cfg(test)]
+mod restore_rect_tests {
+    use super::*;
+    use windows::Win32::Foundation::RECT;
+    use windows::Win32::Graphics::Gdi::MONITORINFO;
+
+    fn rect(left: i32, top: i32, w: i32, h: i32) -> RECT {
+        RECT {
+            left,
+            top,
+            right: left + w,
+            bottom: top + h,
+        }
+    }
+
+    fn monitor(screen: RECT, work: RECT) -> MONITORINFO {
+        MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            rcMonitor: screen,
+            rcWork: work,
+            dwFlags: 0,
+        }
+    }
+
+    #[test]
+    fn converts_with_each_monitors_own_reservation() {
+        // Primary with no reservation; a secondary to its right with a 60px
+        // bar along its top, so its workspace origin is 60px below its screen
+        // origin.
+        let primary = monitor(rect(0, 0, 2880, 1800), rect(0, 0, 2880, 1800));
+        let secondary = monitor(rect(2880, 0, 1920, 1080), rect(2880, 60, 1920, 1020));
+        assert_eq!(workspace_offset(&primary, false), (0, 0));
+        assert_eq!(workspace_offset(&secondary, false), (0, 60));
+
+        // A 945x200 stub restored on the secondary keeps its width (over a
+        // third of 1920) and gets two thirds of the height, 680. Centered in
+        // the work area that is (3367, 230) on screen, (3367, 170) in that
+        // monitor's workspace coordinates.
+        let stub = rect(-32000, -32000, 945, 200);
+        assert_eq!(
+            restore_rect_on_monitor(stub, &secondary, false),
+            rect(3367, 170, 945, 680)
+        );
+        // On the primary, screen and workspace coordinates coincide.
+        assert_eq!(
+            restore_rect_on_monitor(stub, &primary, false),
+            rect(480, 300, 1920, 1200)
+        );
+    }
+
+    #[test]
+    fn keeps_tool_windows_in_screen_coordinates() {
+        let secondary = monitor(rect(2880, 0, 1920, 1080), rect(2960, 0, 1840, 1080));
+        assert_eq!(workspace_offset(&secondary, true), (0, 0));
+        let stub = rect(-32000, -32000, 945, 200);
+        // Centered in the work area right of an 80px bar along the left edge,
+        // and returned in screen coordinates.
+        assert_eq!(
+            restore_rect_on_monitor(stub, &secondary, true),
+            rect(3407, 180, 945, 720)
+        );
+    }
+
+    #[test]
+    fn keeps_a_usable_size_and_centers_it() {
+        let work = rect(0, 0, 2880, 1800);
+        assert_eq!(
+            on_screen_restore_rect(rect(-32000, -32000, 1200, 800), work),
+            rect(840, 500, 1200, 800)
+        );
+    }
+
+    #[test]
+    fn replaces_a_stub_size_with_two_thirds_of_the_work_area() {
+        // A Windows Terminal left at its minimum size at the parking spot.
+        let work = rect(0, 0, 2880, 1800);
+        assert_eq!(
+            on_screen_restore_rect(rect(-32000, -32000, 945, 200), work),
+            rect(480, 300, 1920, 1200)
+        );
+    }
+
+    #[test]
+    fn shrinks_an_oversized_window_to_the_work_area_of_its_monitor() {
+        let work = rect(2880, 100, 1920, 980);
+        assert_eq!(
+            on_screen_restore_rect(rect(-32000, -32000, 3000, 2000), work),
+            work
+        );
+    }
 }
 
 #[cfg(test)]
@@ -4176,6 +4482,7 @@ pub enum SystemAction {
     InstalledApps,
     PowerOptions,
     NetworkConnections,
+    TaskView,
 }
 
 #[tauri::command]
@@ -4209,6 +4516,13 @@ pub async fn open_system_action(action: SystemAction) -> Result<(), String> {
             SystemAction::InstalledApps => ("ms-settings:appsfeatures".into(), String::new()),
             SystemAction::PowerOptions => ("ms-settings:powersleep".into(), String::new()),
             SystemAction::NetworkConnections => ("ms-settings:network".into(), String::new()),
+            // Task View's shell folder opens Task View like the taskbar's
+            // button, without sending Win+Tab, which a held Ctrl or Shift
+            // would turn into a different shortcut.
+            SystemAction::TaskView => (
+                "explorer.exe".into(),
+                "shell:::{3080F90E-D7AD-11D9-BD98-0000947B0257}".into(),
+            ),
         };
         let file: Vec<u16> = file.encode_utf16().chain(Some(0)).collect();
         let args: Vec<u16> = args.encode_utf16().chain(Some(0)).collect();

@@ -1,21 +1,26 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod battery;
 mod bluetooth;
+mod buds;
 mod commands;
+mod diagnostics;
 mod dock_extras;
+mod jack;
 mod services;
+mod settings_window;
 mod shelf;
 mod shelf_preview;
 mod state;
 mod tray;
 mod types;
 mod updater;
+mod usb;
 mod utils;
 mod wifi;
 mod hardware;
 mod optimizer;
 mod jack;
-mod usb;
 mod window_region;
 mod razer;
 
@@ -112,6 +117,7 @@ fn main() {
         }
     }
 
+    diagnostics::initialize();
     setup_brightness_worker();
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
@@ -128,6 +134,7 @@ fn main() {
             run_smart_boost,
             hide_native_osd,
             open_settings_window,
+            close_settings_window,
             open_wifi_settings,
             open_sound_settings,
             get_audio_output_devices,
@@ -164,6 +171,7 @@ fn main() {
             launch_new_instance,
             update_dock_rect,
             update_notch_rect,
+            window_region::set_window_region,
             set_dock_hovered,
             set_notch_hovered,
             set_notch_visible,
@@ -213,22 +221,22 @@ fn main() {
             set_brightness,
             get_battery_saver_state,
             open_battery_saver_settings,
+            battery::get_battery_details,
             get_system_accent_color,
             get_cpu_usage,
             get_ram_usage,
             get_disk_space,
             get_network_speed,
-            export_settings,
-            import_settings,
+            export_settings_to_file,
+            import_settings_from_file,
             reset_settings,
-            read_settings_from_path,
-            write_settings_to_path,
             updater::check_for_updates,
             updater::install_update,
             updater::get_update_state,
             dock_extras::get_dock_extras,
             dock_extras::open_dock_extra,
             dock_extras::eject_dock_extra,
+            dock_extras::get_dock_drives,
             wifi::wifi_list_networks,
             wifi::wifi_scan,
             wifi::wifi_connect,
@@ -241,6 +249,7 @@ fn main() {
             bluetooth::bluetooth_pair,
             bluetooth::bluetooth_pairing_respond,
             bluetooth::bluetooth_unpair,
+            bluetooth::bluetooth_refresh_buds,
             get_quick_look_data,
             close_quick_look,
             close_spotlight,
@@ -284,6 +293,8 @@ fn main() {
                     return Err("main window not found".into());
                 }
             };
+            let _ = window.set_ignore_cursor_events(true);
+
             let dock_win = match app.get_webview_window("dock") {
                 Some(w) => w,
                 None => {
@@ -291,6 +302,10 @@ fn main() {
                     return Err("dock window not found".into());
                 }
             };
+            let _ = dock_win.set_ignore_cursor_events(true);
+            if let Ok(hwnd) = dock_win.hwnd() {
+                DOCK_HWND.store(hwnd.0 as isize, Ordering::Relaxed);
+            }
             log_boot("setup() step 4: windows retrieved");
 
             // Sync window rects initially and on event
@@ -375,6 +390,9 @@ fn main() {
             // take effect on a window that has never been shown. Show it once
             // to register it with the compositor, then hide immediately.
             if let Some(ov_win) = app.get_webview_window("overlay") {
+                // Layered from the start, like the notch and dock (see
+                // set_click_through): the overlay has a window region too.
+                let _ = ov_win.set_ignore_cursor_events(true);
                 let _ = ov_win.show();
                 let _ = ov_win.hide();
                 let overlay_handle = app.handle().clone();
@@ -410,6 +428,7 @@ fn main() {
             setup_taskbar_hook();
             setup_audio_visualization(app.handle().clone());
             setup_settings_watcher(app.handle().clone());
+            diagnostics::record("services_ready", "hooks and settings watcher initialized");
             wifi::setup_wifi_notifications(app.handle().clone());
             log_boot("setup() step 5: setting up services");
             bluetooth::setup_bluetooth_notifications(app.handle().clone());
@@ -470,19 +489,6 @@ fn main() {
                 }
             }
 
-            if let Some(settings_win) = app.get_webview_window("settings") {
-                #[cfg(target_os = "windows")]
-                {
-                    let _ = window_vibrancy::apply_mica(&settings_win, None);
-                }
-                let win_clone = settings_win.clone();
-                settings_win.on_window_event(move |event| {
-                    if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                        api.prevent_close();
-                        let _ = win_clone.hide();
-                    }
-                });
-            }
             {
                 use tauri::menu::{Menu, MenuItem};
                 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
@@ -499,13 +505,9 @@ fn main() {
                     .menu(&menu)
                     .on_menu_event(move |_, event| match event.id().as_ref() {
                         "quit" => {
+                            diagnostics::record("shutdown", "source=tray");
                             SHUTTING_DOWN.store(true, Ordering::Relaxed);
-                            if let Some(w) = ah.get_webview_window("main") {
-                                unregister_appbar_native(w.hwnd().unwrap());
-                            }
-                            if let Some(w) = ah.get_webview_window("dock") {
-                                unregister_appbar_native(w.hwnd().unwrap());
-                            }
+                            crate::commands::release_appbars(&ah);
                             set_taskbar_visibility(true, true);
                             NATIVE_TASKBAR_HIDDEN.store(false, Ordering::Relaxed);
                             set_native_osd_suppressed(false);
@@ -513,13 +515,9 @@ fn main() {
                             ah.exit(0);
                         }
                         "restart" => {
+                            diagnostics::record("restart", "source=tray");
                             SHUTTING_DOWN.store(true, Ordering::Relaxed);
-                            if let Some(w) = ah.get_webview_window("main") {
-                                unregister_appbar_native(w.hwnd().unwrap());
-                            }
-                            if let Some(w) = ah.get_webview_window("dock") {
-                                unregister_appbar_native(w.hwnd().unwrap());
-                            }
+                            crate::commands::release_appbars(&ah);
                             if let Some(w) = ah.get_webview_window("settings") {
                                 let _ = w.destroy();
                             }
@@ -561,6 +559,7 @@ fn main() {
             }
             tauri::RunEvent::Exit => {
                 log_boot("app.run: Exit");
+                diagnostics::record("exit", "restoring native taskbar");
                 set_taskbar_visibility(true, true);
                 NATIVE_TASKBAR_HIDDEN.store(false, Ordering::Relaxed);
                 set_native_osd_suppressed(false);
@@ -577,11 +576,6 @@ fn main() {
                 }
             }
             _ => {}
-        }
-        if false {
-            set_taskbar_visibility(true, true);
-            NATIVE_TASKBAR_HIDDEN.store(false, Ordering::Relaxed);
-            set_native_osd_suppressed(false);
         }
     });
 }

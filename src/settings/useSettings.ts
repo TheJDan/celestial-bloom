@@ -44,6 +44,7 @@ export function useSettings() {
 	}, []);
 	const [autostart, setAutostart] = useState(false);
 	const [weatherEnabled, setWeatherEnabled] = useState(true);
+	const [calendarMondayFirst, setCalendarMondayFirst] = useState(false);
 	const [calendarEnabled, setCalendarEnabled] = useState(true);
 	const [controlsPanelEnabled, setControlsPanelEnabled] = useState(true);
 	const [devicesPanelEnabled, setDevicesPanelEnabled] = useState(false);
@@ -82,6 +83,9 @@ export function useSettings() {
 	);
 	const [cornersEnabled, setCornersEnabled] = useState(
 		() => localStorage.getItem("bloom-corners-enabled") === "true"
+	);
+	const [edgeShineEnabled, setEdgeShineEnabled] = useState(
+		() => localStorage.getItem("bloom-edge-shine-enabled") !== "false"
 	);
 	const [showUpdateIndicator, setShowUpdateIndicator] = useState(
 		() => localStorage.getItem("bloom-show-update-indicator") !== "false"
@@ -217,6 +221,7 @@ export function useSettings() {
 
 			apply(getVal("bloom-weather-enabled"), setWeatherEnabled, readBool);
 			apply(getVal("bloom-calendar-enabled"), setCalendarEnabled, readBool);
+			apply(getVal("bloom-calendar-monday-first"), setCalendarMondayFirst, readBool);
 			apply(getVal("bloom-notch-command-center-enabled"), setControlsPanelEnabled, readBool);
 			apply(getVal("bloom-notch-devices-enabled"), setDevicesPanelEnabled, readBool);
 			apply(getVal("bloom-timer-sound-enabled"), setTimerSoundEnabled, readBool);
@@ -231,6 +236,7 @@ export function useSettings() {
 			apply(getVal("bloom-media-ambience-enabled"), setMediaAmbienceEnabled, readBool);
 			apply(getVal("bloom-media-compact-glow-enabled"), setMediaCompactGlowEnabled, readBool);
 			apply(getVal("bloom-corners-enabled"), setCornersEnabled, readBool);
+			setEdgeShineEnabled(getVal("bloom-edge-shine-enabled") !== "false");
 			apply(getVal("bloom-time-format-24h"), setTimeFormat24h, readBool);
 			apply(getVal("bloom-show-update-indicator"), setShowUpdateIndicator, readBool);
 			apply(getVal("bloom-auto-update"), setAutoUpdate, readBool);
@@ -399,6 +405,7 @@ export function useSettings() {
 		"bloom-dock-extras-custom-folders": setDockExtrasCustomFolders,
 		"bloom-weather-enabled": setWeatherEnabled,
 		"bloom-calendar-enabled": setCalendarEnabled,
+		"bloom-calendar-monday-first": setCalendarMondayFirst,
 		"bloom-notch-command-center-enabled": setControlsPanelEnabled,
 		"bloom-notch-devices-enabled": setDevicesPanelEnabled,
 		"bloom-timer-sound-enabled": setTimerSoundEnabled,
@@ -411,6 +418,7 @@ export function useSettings() {
 		"bloom-media-compact-glow-enabled": setMediaCompactGlowEnabled,
 		"bloom-media-layout": setMediaLayout,
 		"bloom-corners-enabled": setCornersEnabled,
+		"bloom-edge-shine-enabled": setEdgeShineEnabled,
 		"bloom-show-update-indicator": setShowUpdateIndicator,
 		"bloom-time-format-24h": setTimeFormat24h,
 		"bloom-low-battery-threshold": setLowBatteryThreshold,
@@ -561,6 +569,12 @@ export function useSettings() {
 	const enabledPanelCount =
 		Number(calendarEnabled) + Number(controlsPanelEnabled) + Number(devicesPanelEnabled);
 
+	const toggleCalendarMondayFirst = () => {
+		const next = !calendarMondayFirst;
+		setCalendarMondayFirst(next);
+		saveSetting("bloom-calendar-monday-first", String(next));
+	};
+
 	const toggleCalendar = () => {
 		const next = !calendarEnabled;
 		if (!next && enabledPanelCount <= 1) return;
@@ -664,6 +678,11 @@ export function useSettings() {
 		saveSetting("bloom-media-compact-glow-enabled", String(next));
 	};
 
+	const toggleEdgeShine = () => {
+		const next = !edgeShineEnabled;
+		setEdgeShineEnabled(next);
+		saveSetting("bloom-edge-shine-enabled", String(next));
+	};
 	const toggleCorners = () => {
 		const next = !cornersEnabled;
 		setCornersEnabled(next);
@@ -1013,6 +1032,8 @@ export function useSettings() {
 		handleNotchScaleChange,
 		cornersEnabled,
 		toggleCorners,
+		edgeShineEnabled,
+		toggleEdgeShine,
 
 		// Theme
 		themeMode,
@@ -1031,6 +1052,8 @@ export function useSettings() {
 		setNotchModeValue,
 		notchEdgeDelay,
 		handleNotchEdgeDelayChange,
+		calendarMondayFirst,
+		toggleCalendarMondayFirst,
 		calendarEnabled,
 		toggleCalendar,
 		controlsPanelEnabled,

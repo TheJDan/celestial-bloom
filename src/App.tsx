@@ -92,6 +92,7 @@ import { deviceArtFor } from "./devices/deviceArtFor";
 import { deviceLookFor } from "./devices/deviceLooks";
 import type { BudLevel, BudsBattery } from "./devices/connectedDevices";
 import { ConnectedDevicesPanel } from "./components/ConnectedDevicesPanel";
+import { Calendar, calendarRows } from "./components/Calendar";
 import { useConnectedDevices } from "./hooks/useConnectedDevices";
 import { isWiredAudio, usbArtFor, usbDisplayName, type UsbIdentity } from "./devices/usbArtFor";
 import type { DeviceArtKey } from "./devices/art";
@@ -115,7 +116,14 @@ import {
 	Bot,
 	Zap,
 	CheckCircle,
-	ShieldCheck
+	ShieldCheck,
+	VolumeX,
+	Volume,
+	Volume1,
+	Volume2,
+	SunDim,
+	SunMedium,
+	Sun
 } from "lucide-react";
 
 /**
@@ -148,20 +156,22 @@ const asNotchPanel = (value: unknown): NotchPanel | null =>
 
 // The Connected devices panel grows with its list between these heights;
 // the maximum is the size the panel had before it grew to fit.
+const COMMAND_CENTER_WIDTH = 375;
 const DEVICES_MIN_HEIGHT = 150;
 const DEVICES_MAX_HEIGHT = 300;
 
 // Pomodoro timer limit.
 const MAX_TIMER_SECONDS = 180 * 60;
 
-// Inline timer editing: digits fill from the right and the colon is inserted
-// automatically ("130" -> 1:30, "2500" -> 25:00, "45" -> 0:45).
-const timerDigitsToSeconds = (digits: string): number | null => {
-	if (!digits) return null;
-	const secs = parseInt(digits.slice(-2) || "0", 10);
-	const mins = parseInt(digits.slice(0, -2) || "0", 10);
-	const total = mins * 60 + secs;
-	return total > 0 && total <= MAX_TIMER_SECONDS ? total : null;
+// Accept both mm:ss and compact digits ("130" -> 1:30).
+const timerDigitsToSeconds = (value: string): number | null => {
+	if (!/^\d{1,5}$/.test(value) && !/^\d{1,3}:\d{1,2}$/.test(value)) return null;
+	const [minutes, seconds] = value.includes(":")
+		? value.split(":")
+		: [value.slice(0, -2) || "0", value.slice(-2)];
+	const secs = Number(seconds);
+	const total = Number(minutes) * 60 + secs;
+	return secs < 60 && total > 0 && total <= MAX_TIMER_SECONDS ? total : null;
 };
 
 const timerSecondsToDigits = (seconds: number): string => {
@@ -171,6 +181,7 @@ const timerSecondsToDigits = (seconds: number): string => {
 };
 
 const formatTimerDigits = (digits: string): string => {
+	digits = digits.replace(/\D/g, "");
 	if (!digits) return "0:00";
 	const secs = digits.slice(-2).padStart(2, "0");
 	const mins = parseInt(digits.slice(0, -2) || "0", 10);
@@ -434,16 +445,6 @@ export const Visualizer = memo(function Visualizer({
 		</div>
 	);
 });
-
-// Number of week rows the current month occupies. Calendar mode sizes the
-// notch to the month so five-row months stay compact and six-row months never
-// clip the last row.
-const calendarMonthRows = (() => {
-	const now = new Date();
-	const firstWeekday = new Date(now.getFullYear(), now.getMonth(), 1).getDay();
-	const daysInMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
-	return Math.ceil((firstWeekday + daysInMonth) / 7);
-})();
 
 // Odometer-style digit for the timer clock. When the value changes the old
 // digit rolls up and out while the new one rolls in from below with a slight
@@ -956,6 +957,12 @@ function App() {
 		const saved = localStorage.getItem("bloom-last-brightness");
 		return saved ? parseInt(saved, 10) : 50;
 	});
+	const previousVolume = useRef(0.5);
+	const previousBrightness = useRef(50);
+	const [calendarMonth, setCalendarMonth] = useState(() => {
+		const now = new Date();
+		return new Date(now.getFullYear(), now.getMonth(), 1);
+	});
 
 	// System metrics for status widgets
 	const [cpuUsage, setCpuUsage] = useState(0);
@@ -1281,6 +1288,9 @@ function App() {
 	const [settingsWeatherEnabled, setSettingsWeatherEnabled] = useState(
 		() => localStorage.getItem("bloom-weather-enabled") !== "false"
 	);
+	const [calendarMondayFirst, setCalendarMondayFirst] = useState(
+		() => localStorage.getItem("bloom-calendar-monday-first") === "true"
+	);
 	const [settingsCalendarEnabled, setSettingsCalendarEnabled] = useState(
 		() => localStorage.getItem("bloom-calendar-enabled") !== "false"
 	);
@@ -1334,6 +1344,9 @@ function App() {
 	const [settingsCornersEnabled, setSettingsCornersEnabled] = useState(
 		() => localStorage.getItem("bloom-corners-enabled") === "true"
 	);
+	const [edgeShineEnabled, setEdgeShineEnabled] = useState(
+		() => localStorage.getItem("bloom-edge-shine-enabled") !== "false"
+	);
 	const [mediaLayout, setMediaLayout] = useState<"classic" | "compact">(
 		() => (localStorage.getItem("bloom-media-layout") as "classic" | "compact") || "classic"
 	);
@@ -1366,6 +1379,7 @@ function App() {
 
 				setSettingsWeatherEnabled(getVal("bloom-weather-enabled", "true") !== "false");
 				setSettingsCalendarEnabled(getVal("bloom-calendar-enabled", "true") !== "false");
+				setCalendarMondayFirst(getVal("bloom-calendar-monday-first", "false") === "true");
 				setSettingsControlsPanelEnabled(
 					getVal("bloom-notch-command-center-enabled", "true") !== "false"
 				);
@@ -1388,6 +1402,7 @@ function App() {
 					getVal("bloom-media-compact-glow-enabled", "true") !== "false"
 				);
 				setSettingsCornersEnabled(getVal("bloom-corners-enabled", "false") === "true");
+				setEdgeShineEnabled(getVal("bloom-edge-shine-enabled", "true") !== "false");
 				setTimeFormat24h(getVal("bloom-time-format-24h") === "true");
 
 				const thresholdStr = getVal("bloom-low-battery-threshold", "20");
@@ -1540,6 +1555,7 @@ function App() {
 		{
 			"bloom-weather-enabled": setSettingsWeatherEnabled,
 			"bloom-calendar-enabled": setSettingsCalendarEnabled,
+			"bloom-calendar-monday-first": setCalendarMondayFirst,
 			"bloom-notch-command-center-enabled": setSettingsControlsPanelEnabled,
 			"bloom-notch-devices-enabled": setSettingsDevicesPanelEnabled,
 			"bloom-timer-sound-enabled": setSettingsTimerSoundEnabled,
@@ -1557,6 +1573,7 @@ function App() {
 			"bloom-media-compact-glow-enabled": setSettingsCompactGlowEnabled,
 			"bloom-media-layout": setMediaLayout,
 			"bloom-corners-enabled": setSettingsCornersEnabled,
+			"bloom-edge-shine-enabled": setEdgeShineEnabled,
 			"bloom-notch-scale": setScale,
 			"bloom-scale": (v: number) => {
 				if (!localStorage.getItem("bloom-notch-scale")) setScale(v);
@@ -2209,7 +2226,7 @@ function App() {
 	const handleWheel = (e: React.WheelEvent) => {
 		const target = e.target as HTMLElement;
 		if (
-			target.closest(".calendar-grid") ||
+			target.closest(".calendar-container") ||
 			target.closest(".timer-column") ||
 			target.closest(".shelf-content") ||
 			target.closest(".qp-list")
@@ -2325,8 +2342,7 @@ function App() {
 		}
 	};
 
-	// Clicking the big time turns it into a masked editor. Digits fill from the
-	// right, so the colon never has to be typed.
+	// Keep raw digits in the input; the clock adds the colon without moving the caret.
 	const beginTimerEdit = () => {
 		if (isTimerRunning || isEditingTimer) return;
 		if (isTimerFinished) resetTimer();
@@ -2338,16 +2354,20 @@ function App() {
 
 	const commitTimerEdit = (start: boolean) => {
 		if (!timerEditActiveRef.current) return;
+		const total = timerDigitsToSeconds(timerEditDigits);
+		if (total === null && start) {
+			timerInputRef.current?.focus();
+			return;
+		}
 		timerEditActiveRef.current = false;
 		setIsEditingTimer(false);
-		const total = timerDigitsToSeconds(timerEditDigits);
 		if (total === null) return;
 		const base = timerSeconds > 0 ? timerSeconds : lastDurationSeconds;
 		// A tap that changes nothing (e.g. paused timer) must not reset the state.
 		if (!start && total === base) return;
 		localStorage.setItem("bloom-timer-last-duration", String(total));
 		setLastDurationSeconds(total);
-		setTimerSeconds(start ? total : 0);
+		setTimerSeconds(total);
 		setIsTimerRunning(start);
 		setIsTimerFinished(false);
 		if (start) getTimerChimeCtx();
@@ -2355,8 +2375,19 @@ function App() {
 
 	useEffect(() => {
 		if (isEditingTimer) {
-			timerInputRef.current?.focus();
-			timerInputRef.current?.select();
+			// The notch uses WS_EX_NOACTIVATE: DOM focus alone cannot receive typing.
+			let cancelled = false;
+			void getCurrentWebviewWindow()
+				.setFocus()
+				.then(() => {
+					if (cancelled) return;
+					timerInputRef.current?.focus();
+					timerInputRef.current?.select();
+				})
+				.catch(console.error);
+			return () => {
+				cancelled = true;
+			};
 		}
 	}, [isEditingTimer]);
 
@@ -2391,8 +2422,7 @@ function App() {
 
 	// Split the display time into individual flip-clock digits. Keys are counted
 	// from the right so existing digits keep their identity when minutes grow
-	// from two digits to three. While editing, the same clock renders the digits
-	// being typed so the layout never changes.
+	// from two digits to three. The editor occupies the same clock row.
 	const clockText = isEditingTimer
 		? formatTimerDigits(timerEditDigits)
 		: formatTimerTime(timerDisplaySeconds);
@@ -3030,13 +3060,29 @@ function App() {
 
 	const handleVolumeChange = useCallback(
 		(newVol: number) => {
+			if (volume > 0 && !isMuted) previousVolume.current = volume;
 			setVolume(newVol);
 			// set_volume unmutes for any non-zero level.
 			setIsMuted(newVol === 0);
 			sendVolume(newVol);
 		},
-		[sendVolume]
+		[sendVolume, volume, isMuted]
 	);
+	const CommandVolumeIcon =
+		displayVolume === 0
+			? VolumeX
+			: displayVolume < 0.33
+				? Volume
+				: displayVolume < 0.67
+					? Volume1
+					: Volume2;
+	const CommandBrightnessIcon =
+		currentBrightness < 34 ? SunDim : currentBrightness < 67 ? SunMedium : Sun;
+	const toggleVolumeLevel = () => {
+		handleVolumeChange(
+			displayVolume > 0 ? 0 : isMuted && volume > 0 ? volume : previousVolume.current
+		);
+	};
 
 	// WiFi toggle
 	const toggleWifi = useCallback(async () => {
@@ -3156,12 +3202,16 @@ function App() {
 
 	const handleBrightnessChange = useCallback(
 		(newVal: number) => {
+			if (currentBrightness > 0) previousBrightness.current = currentBrightness;
 			setCurrentBrightness(newVal);
 			localStorage.setItem("bloom-last-brightness", String(newVal));
 			sendBrightness(newVal);
 		},
-		[sendBrightness]
+		[sendBrightness, currentBrightness]
 	);
+	const toggleBrightnessLevel = () => {
+		handleBrightnessChange(currentBrightness > 0 ? 0 : previousBrightness.current);
+	};
 
 	const openSettingsWindow = useCallback(async () => {
 		try {
@@ -3414,8 +3464,9 @@ function App() {
 		if (isCalendarMode) return 480;
 		if (bloomMode === "shelf") return shelfViewMode === "deskbox" || shelfItems.length === 0 ? 410 : 380;
 		if (bloomMode === "optimizer" && isOpen) return 370;
-		if (bloomMode === "command-center" && isOpen) return 350;
-		if (bloomMode === "wifi" || bloomMode === "bluetooth" || bloomMode === "system-tray" || bloomMode === "audio-output" || bloomMode === "devices") return 360;
+		if (bloomMode === "command-center" && isOpen) return COMMAND_CENTER_WIDTH;
+		if (bloomMode === "wifi" || bloomMode === "bluetooth" || bloomMode === "system-tray" || bloomMode === "audio-output") return COMMAND_CENTER_WIDTH;
+		if (bloomMode === "devices") return 350;
 		if (showMusicOnStatusHover) {
 			return 170 + (settingsVisualizerEnabled ? 30 : 0);
 		}
@@ -3450,7 +3501,7 @@ function App() {
 		// Device alert: the drawing, with room for its motion.
 		if (bloomMode === "device" && deviceAlert) return 76;
 		// Sized to the calendar's week-row count plus the timer's fixed content.
-		if (bloomMode === "calendar") return calendarMonthRows >= 6 ? 305 : 273;
+		if (bloomMode === "calendar") return 112 + calendarRows(calendarMonth, calendarMondayFirst) * 30;
 		// Shelf expands on mode alone (no hover needed: there is no cursor
 		// hover during an OS drag) and is sized to exactly one row of tiles,
 		// plus room for the scrollbar once the tiles overflow it.
@@ -3614,7 +3665,7 @@ function App() {
 						default: { type: "spring", stiffness: 500, damping: 30, mass: 1 }
 					}}
 				>
-					<EdgeSurface edge="top" flares={isImpacted} />
+					<EdgeSurface edge="top" flares={isImpacted} reflective={edgeShineEnabled} />
 					<JarvisIslandPill />
 					<AnimatePresence>
 						{isMusicMode && settingsAmbienceEnabled && albumArtUrl && isOpen && !isCalendarMode && (
@@ -3915,6 +3966,7 @@ function App() {
 																	min="0"
 																	max="1"
 																	step="0.01"
+																	aria-label="Volume"
 																	value={displayVolume}
 																	onChange={(e) => handleVolumeChange(parseFloat(e.target.value))}
 																	onPointerDown={(e) => e.stopPropagation()}
@@ -4546,16 +4598,17 @@ function App() {
 											<div className="cc-classic-sliders-area">
 												{/* Volume Slider */}
 												<div className="cc-classic-slider-row">
-													<div
-														className="cc-classic-slider-label"
-														style={{ cursor: "pointer" }}
-														onClick={(e) => {
-															e.stopPropagation();
-															setBloomMode("audio-output");
-														}}
-														title="Seleccionar salida de audio"
-													>
-														<VolumeLowIcon style={{ opacity: 0.7 }} />
+													<div className="cc-classic-slider-label">
+														<button
+															type="button"
+															className="cc-level-toggle"
+															onClick={toggleVolumeLevel}
+															aria-label={displayVolume > 0 ? "Mute volume" : "Restore volume"}
+															aria-pressed={displayVolume === 0}
+															title={displayVolume > 0 ? "Mute volume" : "Restore volume"}
+														>
+															<CommandVolumeIcon />
+														</button>
 														<span>Volume</span>
 													</div>
 													<div className="cc-classic-slider-track">
@@ -4564,6 +4617,7 @@ function App() {
 															min="0"
 															max="1"
 															step="0.01"
+															aria-label="Volume"
 															value={displayVolume}
 															onChange={(e) => handleVolumeChange(parseFloat(e.target.value))}
 															onPointerDown={(e) => e.stopPropagation()}
@@ -4594,7 +4648,20 @@ function App() {
 												{/* Brightness Slider */}
 												<div className="cc-classic-slider-row">
 													<div className="cc-classic-slider-label">
-														<BrightnessLowIcon />
+														<button
+															type="button"
+															className="cc-level-toggle"
+															onClick={toggleBrightnessLevel}
+															aria-label={
+																currentBrightness > 0 ? "Minimize brightness" : "Restore brightness"
+															}
+															aria-pressed={currentBrightness === 0}
+															title={
+																currentBrightness > 0 ? "Minimize brightness" : "Restore brightness"
+															}
+														>
+															<CommandBrightnessIcon />
+														</button>
 														<span>Brightness</span>
 													</div>
 													<div className="cc-classic-slider-track">
@@ -4603,6 +4670,7 @@ function App() {
 															min="0"
 															max="100"
 															step="1"
+															aria-label="Brightness"
 															value={currentBrightness}
 															onChange={(e) => handleBrightnessChange(parseInt(e.target.value))}
 															onPointerDown={(e) => e.stopPropagation()}
@@ -4862,7 +4930,7 @@ function App() {
 											transition={{ type: "spring", stiffness: 400, damping: 30 }}
 										>
 											<div className="calendar-column">
-												<Calendar />
+												<Calendar mondayFirst={calendarMondayFirst} month={calendarMonth} onMonthChange={setCalendarMonth} />
 											</div>
 
 											<div className="timer-column">
@@ -4870,7 +4938,7 @@ function App() {
 													<div className="timer-main">
 														<div className="timer-status">
 															{isEditingTimer
-																? "Set duration"
+																? "Type to set duration"
 																: isTimerFinished
 																	? "Time's up"
 																	: timerEndTime
@@ -4899,8 +4967,10 @@ function App() {
 																	className="timer-edit-input"
 																	type="text"
 																	inputMode="numeric"
-																	aria-label="Set timer duration"
-																	value={formatTimerDigits(timerEditDigits)}
+																	aria-label="Set timer duration as minutes and seconds, for example 1230 for 12 minutes 30 seconds"
+																	maxLength={5}
+																	aria-invalid={!timerEditValid}
+																	value={timerEditDigits}
 																	onChange={(e) =>
 																		setTimerEditDigits(
 																			e.target.value.replace(/\D/g, "").slice(0, 5)
@@ -4908,6 +4978,10 @@ function App() {
 																	}
 																	onKeyDown={(e) => {
 																		if (e.key === "Enter") commitTimerEdit(true);
+																		if (e.key === "Escape") {
+																			timerEditActiveRef.current = false;
+																			setIsEditingTimer(false);
+																		}
 																	}}
 																	onBlur={() => commitTimerEdit(false)}
 																	onWheel={(e) => e.stopPropagation()}
@@ -5242,57 +5316,6 @@ function App() {
 	);
 }
 
-function Calendar() {
-	const [date] = useState(new Date());
-
-	const daysInMonth = (year: number, month: number) => new Date(year, month + 1, 0).getDate();
-	const firstDayOfMonth = (year: number, month: number) => new Date(year, month, 1).getDay();
-
-	const currentMonth = date.getMonth();
-	const currentYear = date.getFullYear();
-	const monthName = date.toLocaleString("default", { month: "long" });
-
-	const totalDays = daysInMonth(currentYear, currentMonth);
-	const startDay = firstDayOfMonth(currentYear, currentMonth);
-	const days = [];
-
-	// Padding for start of month
-	for (let i = 0; i < startDay; i++) {
-		days.push(<div key={`empty-${i}`} className="calendar-day empty" />);
-	}
-
-	// Actual days
-	const today = new Date().getDate();
-	const isCurrentMonth =
-		new Date().getMonth() === currentMonth && new Date().getFullYear() === currentYear;
-
-	for (let i = 1; i <= totalDays; i++) {
-		days.push(
-			<div key={i} className={`calendar-day ${isCurrentMonth && i === today ? "today" : ""}`}>
-				{i}
-			</div>
-		);
-	}
-
-	return (
-		<div className="calendar-container">
-			<div className="calendar-header">
-				<span className="month-year">
-					{monthName} {currentYear}
-				</span>
-			</div>
-			<div className="calendar-grid">
-				{["S", "M", "T", "W", "T", "F", "S"].map((d, i) => (
-					<div key={`${d}-${i}`} className="day-name">
-						{d}
-					</div>
-				))}
-				{days}
-			</div>
-		</div>
-	);
-}
-
 function BluetoothIcon() {
 	return (
 		<svg
@@ -5325,24 +5348,6 @@ function SettingsIcon() {
 		>
 			<circle cx="12" cy="12" r="3" />
 			<path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
-		</svg>
-	);
-}
-
-function BrightnessLowIcon() {
-	return (
-		<svg
-			width="12"
-			height="12"
-			viewBox="0 0 24 24"
-			fill="none"
-			stroke="currentColor"
-			strokeWidth="2"
-			strokeLinecap="round"
-			strokeLinejoin="round"
-			style={{ opacity: 0.5 }}
-		>
-			<circle cx="12" cy="12" r="5" fill="currentColor" />
 		</svg>
 	);
 }

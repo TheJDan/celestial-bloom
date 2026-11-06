@@ -236,6 +236,8 @@ function SettingsApp() {
 							handleBrightnessChange={settings.handleBrightnessChange}
 							cornersEnabled={settings.cornersEnabled}
 							toggleCorners={settings.toggleCorners}
+							edgeShineEnabled={settings.edgeShineEnabled}
+							toggleEdgeShine={settings.toggleEdgeShine}
 							scale={settings.scale}
 							handleScaleChange={settings.handleScaleChange}
 							dockScale={settings.dockScale}
@@ -250,6 +252,8 @@ function SettingsApp() {
 							setNotchModeValue={settings.setNotchModeValue}
 							notchEdgeDelay={settings.notchEdgeDelay}
 							handleNotchEdgeDelayChange={settings.handleNotchEdgeDelayChange}
+							calendarMondayFirst={settings.calendarMondayFirst}
+							toggleCalendarMondayFirst={settings.toggleCalendarMondayFirst}
 							calendarEnabled={settings.calendarEnabled}
 							toggleCalendar={settings.toggleCalendar}
 							controlsPanelEnabled={settings.controlsPanelEnabled}

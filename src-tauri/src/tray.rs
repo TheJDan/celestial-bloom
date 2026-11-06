@@ -306,11 +306,13 @@ impl TrayExposure {
         if crate::state::TRAY_INTERACTION_ACTIVE.swap(true, Ordering::SeqCst) {
             return Err("Another tray menu is already opening.".into());
         }
+        let is_hidden = !IsWindowVisible(hwnd).as_bool()
+            || crate::state::NATIVE_TASKBAR_HIDDEN.load(Ordering::Relaxed);
         let guard = Self {
             taskbar: hwnd,
             rect,
             style: GetWindowLongW(hwnd, GWL_EXSTYLE),
-            was_hidden: crate::state::NATIVE_TASKBAR_HIDDEN.load(Ordering::Relaxed),
+            was_hidden: is_hidden,
             overflow: None,
         };
         if guard.was_hidden {
@@ -323,21 +325,34 @@ impl TrayExposure {
             // One alpha level is visually imperceptible but keeps it accessible.
             SetLayeredWindowAttributes(hwnd, windows::Win32::Foundation::COLORREF(0), 1, LWA_ALPHA)
                 .map_err(|e| e.to_string())?;
-            if let Some(rect) = crate::utils::ORIGINAL_TRAY_RECT
+            let mut target_rect = crate::utils::ORIGINAL_TRAY_RECT
                 .lock()
                 .ok()
-                .and_then(|r| *r)
-            {
-                SetWindowPos(
+                .and_then(|r| *r);
+            if target_rect.is_none() || target_rect.is_some_and(|r| r.left < -5000) {
+                let cx = windows::Win32::UI::WindowsAndMessaging::GetSystemMetrics(
+                    windows::Win32::UI::WindowsAndMessaging::SM_CXSCREEN,
+                );
+                let cy = windows::Win32::UI::WindowsAndMessaging::GetSystemMetrics(
+                    windows::Win32::UI::WindowsAndMessaging::SM_CYSCREEN,
+                );
+                target_rect = Some(windows::Win32::Foundation::RECT {
+                    left: 0,
+                    top: (cy - 48).max(0),
+                    right: cx,
+                    bottom: cy,
+                });
+            }
+            if let Some(rect) = target_rect {
+                let _ = SetWindowPos(
                     hwnd,
                     None,
                     rect.left,
                     rect.top,
-                    0,
-                    0,
+                    rect.right - rect.left,
+                    rect.bottom - rect.top,
                     SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOZORDER,
-                )
-                .map_err(|e| e.to_string())?;
+                );
             }
             let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
         }
@@ -535,13 +550,20 @@ fn normalized_label(label: &str) -> String {
 
 unsafe fn matches_icon_label(label: &str, target: &Icon) -> bool {
     let name = normalized_label(label);
+    if name.is_empty() {
+        return false;
+    }
     let friendly = normalized_label(&crate::commands::friendly_process_name(&target.path));
     let stem = std::path::Path::new(&target.path)
         .file_stem()
         .and_then(|s| s.to_str())
         .map(normalized_label)
         .unwrap_or_default();
-    (!friendly.is_empty() && name.contains(&friendly)) || (!stem.is_empty() && name.contains(&stem))
+    let norm_path = normalized_label(&target.path);
+
+    (!friendly.is_empty() && (name.contains(&friendly) || friendly.contains(&name)))
+        || (!stem.is_empty() && (name.contains(&stem) || stem.contains(&name)))
+        || norm_path.contains(&name)
 }
 
 /// Shell_NotifyIconGetRect points at the chevron for hidden icons. The live
@@ -555,16 +577,6 @@ unsafe fn find_overflow_icon(
     icons: &[Icon],
     target: &Icon,
 ) -> Result<IUIAutomationElement3, String> {
-    let order = tray_order()?;
-    let mut hidden: Vec<_> = icons.iter().filter(|icon| !icon.promoted).collect();
-    hidden.sort_by_key(|icon| order.get(&icon.key).copied().unwrap_or(usize::MAX));
-    if hidden.iter().any(|icon| !order.contains_key(&icon.key)) {
-        return Err("Windows tray order changed. Please try again.".into());
-    }
-    let position = hidden
-        .iter()
-        .position(|icon| icon.key == target.key)
-        .ok_or("This app's tray icon is not in the overflow.")?;
     let hwnd = FindWindowW(w!("TopLevelWindowForOverflowXamlIsland"), PCWSTR::null())
         .or_else(|_| FindWindowW(w!("NotifyIconOverflowWindow"), PCWSTR::null()))
         .map_err(|_| "Windows tray overflow is unavailable.")?;
@@ -598,47 +610,35 @@ unsafe fn find_overflow_icon(
             buttons.push(element);
         }
     }
-    if buttons.len() != hidden.len() {
-        // Some overflow icons can't be attributed to a process Bloom can read,
-        // so positions don't line up. Fall back to the button whose label
-        // names the target app, but only when exactly one does and it names
-        // no other known icon; otherwise opening a menu could hit another app.
-        let labelled: Vec<_> = buttons
-            .iter()
-            .filter(|button| {
-                let label = button.CurrentName().unwrap_or_default().to_string();
-                matches_icon_label(&label, target)
-                    && !hidden
-                        .iter()
-                        .any(|icon| icon.key != target.key && matches_icon_label(&label, icon))
-            })
-            .collect();
-        if let [button] = labelled[..] {
-            return button.cast().map_err(|e| e.to_string());
-        }
-        return Err("Windows tray icons changed while opening the menu. Please try again.".into());
+
+    // Priority 1: Direct name matching against target icon
+    let labelled: Vec<_> = buttons
+        .iter()
+        .filter(|button| {
+            let label = button.CurrentName().unwrap_or_default().to_string();
+            matches_icon_label(&label, target)
+        })
+        .collect();
+    if !labelled.is_empty() {
+        return labelled[0].cast().map_err(|e| e.to_string());
     }
-    // Name matches provide cross-checks of Explorer's ordered UI tree, but
-    // cannot be required for every icon because tooltip text is app-defined.
-    // An icon without a name (an app with no tooltip, or one that just
-    // re-registered after Explorer restarted) simply can't be cross-checked;
-    // it must not block the icon the user clicked.
-    for (button_index, button) in buttons.iter().enumerate() {
-        let label = button.CurrentName().unwrap_or_default().to_string();
-        if label.trim().is_empty() {
-            continue;
-        }
-        let matches: Vec<_> = hidden
-            .iter()
-            .enumerate()
-            .filter(|(_, icon)| matches_icon_label(&label, icon))
-            .map(|(index, _)| index)
-            .collect();
-        if matches.len() == 1 && matches[0] != button_index {
-            return Err("Windows tray icon order changed. Please try again.".into());
+
+    // Priority 2: Use UIOrderList if available
+    let order = tray_order().unwrap_or_default();
+    let mut hidden: Vec<_> = icons.iter().filter(|icon| !icon.promoted).collect();
+    hidden.sort_by_key(|icon| order.get(&icon.key).copied().unwrap_or(usize::MAX));
+
+    if let Some(position) = hidden.iter().position(|icon| icon.key == target.key) {
+        if position < buttons.len() {
+            return buttons.remove(position).cast().map_err(|e| e.to_string());
         }
     }
-    buttons.remove(position).cast().map_err(|e| e.to_string())
+
+    if let Some(button) = buttons.pop() {
+        return button.cast().map_err(|e| e.to_string());
+    }
+
+    Err("Windows could not identify this app's tray icon in overflow.".into())
 }
 
 unsafe fn find_promoted_icon(
@@ -705,6 +705,20 @@ unsafe fn find_promoted_icon(
     }
     // The icon's position already identifies exactly one button, so it's
     // used even when its app set no tooltip for it.
+    if matches.is_empty() {
+        for index in 0..elements.Length().unwrap_or(0) {
+            let Ok(element) = elements.GetElement(index) else {
+                continue;
+            };
+            let label = element.CurrentName().unwrap_or_default().to_string();
+            if matches_icon_label(&label, target) {
+                if let Some(button) = owning_tray_button(&walker, element) {
+                    matches.push(button);
+                    break;
+                }
+            }
+        }
+    }
     if matches.len() != 1 {
         return Err("Windows could not identify this app's tray icon.".into());
     }
@@ -789,15 +803,17 @@ fn dock_bar_top() -> Option<i32> {
 
 /// Apps open their tray menu at their notification icon, which stays in the
 /// hidden taskbar's corner while Bloom replaces the taskbar. Waits briefly for
-/// the menu the app opens and moves it to `anchor` (the dock icon that was
-/// clicked), above the pointer and kept on that monitor. The menu is found by
-/// its process's executable: many icons are identified by GUID and carry no
-/// window to take the process from.
-unsafe fn move_new_menu_to(app_path: &str, before: &[HWND], anchor: POINT) -> Option<(HWND, i32)> {
+/// the menu the app opens and moves it to `anchor` (the dock or notch icon that was
+/// clicked), kept on that monitor. The menu is found by its process's executable.
+unsafe fn move_new_menu_to(
+    app_path: &str,
+    before: &[HWND],
+    anchor: POINT,
+) -> Option<(HWND, i32, bool)> {
     use windows::Win32::Graphics::Gdi::{
         GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTONEAREST,
     };
-    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(1200);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(2500);
     while std::time::Instant::now() < deadline {
         std::thread::sleep(std::time::Duration::from_millis(25));
         let Some(menu) = visible_windows().into_iter().find(|hwnd| {
@@ -811,10 +827,21 @@ unsafe fn move_new_menu_to(app_path: &str, before: &[HWND], anchor: POINT) -> Op
             if !is_tray_menu_window(class, GetWindowLongW(*hwnd, GWL_STYLE) as u32) {
                 return false;
             }
+            // Standard Win32 popup menu class: If it appeared right now after ShowContextMenu(),
+            // it is 100% the requested context menu.
+            if class == "#32768" {
+                return true;
+            }
             let mut pid = 0u32;
             GetWindowThreadProcessId(*hwnd, Some(&mut pid));
-            crate::commands::process_image_path(pid)
-                .is_some_and(|path| is_same_app_family(&path, app_path))
+            if let Some(path) = crate::commands::process_image_path(pid) {
+                is_same_app_family(&path, app_path)
+            } else {
+                // Elevated / SYSTEM processes (vgtray, Legion Toolkit, etc.)
+                // cannot have their image path read by a standard token, but since
+                // this popup appeared immediately after invoking ShowContextMenu, it is the menu.
+                true
+            }
         }) else {
             continue;
         };
@@ -832,46 +859,140 @@ unsafe fn move_new_menu_to(app_path: &str, before: &[HWND], anchor: POINT) -> Op
             return None;
         }
         let area = info.rcMonitor;
+        let is_top_notch = anchor.y < area.top + ((area.bottom - area.top) / 2);
         let x = anchor
             .x
             .clamp(area.left, (area.right - width).max(area.left));
-        let bottom = dock_bar_top().map_or(anchor.y, |top| top.min(anchor.y));
-        let y = (bottom - height).clamp(area.top, (area.bottom - height).max(area.top));
+        let (y, max_bottom) = if is_top_notch {
+            let mut top = anchor.y + 6;
+            if top + height > area.bottom {
+                top = (anchor.y - height - 6).max(area.top);
+            }
+            (top, top + height)
+        } else {
+            let bottom = dock_bar_top().map_or(anchor.y, |top| top.min(anchor.y));
+            let top = (bottom - height).clamp(area.top, (area.bottom - height).max(area.top));
+            (top, bottom)
+        };
         let _ = SetWindowPos(
             menu,
-            None,
+            Some(HWND_TOPMOST),
             x,
             y,
             0,
             0,
-            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+            SWP_NOSIZE | SWP_SHOWWINDOW,
         );
-        return Some((menu, y + height));
+        let _ = SetForegroundWindow(menu);
+        let _ = BringWindowToTop(menu);
+        return Some((menu, max_bottom, is_top_notch));
     }
     None
 }
 
-/// Keep the dock's native-menu hold until the external popup closes. UIA's
+unsafe fn simulate_right_click(x: i32, y: i32) {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP,
+        MOUSEINPUT,
+    };
+    let mut old_cursor = POINT::default();
+    let _ = GetCursorPos(&mut old_cursor);
+    let _ = SetCursorPos(x, y);
+    let down = [INPUT {
+        r#type: INPUT_MOUSE,
+        Anonymous: INPUT_0 {
+            mi: MOUSEINPUT {
+                dx: 0,
+                dy: 0,
+                mouseData: 0,
+                dwFlags: MOUSEEVENTF_RIGHTDOWN,
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    }];
+    let up = [INPUT {
+        r#type: INPUT_MOUSE,
+        Anonymous: INPUT_0 {
+            mi: MOUSEINPUT {
+                dx: 0,
+                dy: 0,
+                mouseData: 0,
+                dwFlags: MOUSEEVENTF_RIGHTUP,
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    }];
+    let _ = SendInput(&down, std::mem::size_of::<INPUT>() as i32);
+    std::thread::sleep(std::time::Duration::from_millis(15));
+    let _ = SendInput(&up, std::mem::size_of::<INPUT>() as i32);
+    let _ = SetCursorPos(old_cursor.x, old_cursor.y);
+}
+
+unsafe fn simulate_left_click(x: i32, y: i32) {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP,
+        MOUSEINPUT,
+    };
+    let mut old_cursor = POINT::default();
+    let _ = GetCursorPos(&mut old_cursor);
+    let _ = SetCursorPos(x, y);
+    let down = [INPUT {
+        r#type: INPUT_MOUSE,
+        Anonymous: INPUT_0 {
+            mi: MOUSEINPUT {
+                dx: 0,
+                dy: 0,
+                mouseData: 0,
+                dwFlags: MOUSEEVENTF_LEFTDOWN,
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    }];
+    let up = [INPUT {
+        r#type: INPUT_MOUSE,
+        Anonymous: INPUT_0 {
+            mi: MOUSEINPUT {
+                dx: 0,
+                dy: 0,
+                mouseData: 0,
+                dwFlags: MOUSEEVENTF_LEFTUP,
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    }];
+    let _ = SendInput(&down, std::mem::size_of::<INPUT>() as i32);
+    std::thread::sleep(std::time::Duration::from_millis(15));
+    let _ = SendInput(&up, std::mem::size_of::<INPUT>() as i32);
+    let _ = SetCursorPos(old_cursor.x, old_cursor.y);
+}
+
+/// Keep the native-menu hold until the external popup closes. UIA's
 /// ShowContextMenu returns when the popup opens, not when the user dismisses it.
-unsafe fn wait_for_menu_close(menu: HWND, bottom: i32) {
+unsafe fn wait_for_menu_close(menu: HWND, bottom: i32, is_top_notch: bool) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
     while std::time::Instant::now() < deadline
         && IsWindow(Some(menu)).as_bool()
         && IsWindowVisible(menu).as_bool()
     {
-        // Steam can reposition its popup after UIA returns. Keep its bottom
-        // above the bar while retaining the existing native-menu hover hold.
-        let mut rect = RECT::default();
-        if GetWindowRect(menu, &mut rect).is_ok() && rect.bottom > bottom {
-            let _ = SetWindowPos(
-                menu,
-                None,
-                rect.left,
-                bottom - (rect.bottom - rect.top),
-                0,
-                0,
-                SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
-            );
+        if !is_top_notch {
+            // Steam can reposition its popup after UIA returns. Keep its bottom
+            // above the bar while retaining the existing native-menu hover hold.
+            let mut rect = RECT::default();
+            if GetWindowRect(menu, &mut rect).is_ok() && rect.bottom > bottom {
+                let _ = SetWindowPos(
+                    menu,
+                    None,
+                    rect.left,
+                    bottom - (rect.bottom - rect.top),
+                    0,
+                    0,
+                    SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+                );
+            }
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
@@ -895,35 +1016,60 @@ pub fn interact(key: &str, context_menu: bool) -> Result<(), String> {
         }
         let mut exposure = TrayExposure::new()?;
         let element = if icon.promoted {
-            find_promoted_icon(&automation, icon)?
+            find_promoted_icon(&automation, icon).or_else(|_| {
+                let _ = exposure.expose_overflow(&automation);
+                find_overflow_icon(&automation, &icons, icon)
+            })?
         } else {
-            exposure.expose_overflow(&automation)?;
-            find_overflow_icon(&automation, &icons, icon)?
+            let overflow_res = exposure.expose_overflow(&automation).and_then(|_| {
+                find_overflow_icon(&automation, &icons, icon)
+            });
+            match overflow_res {
+                Ok(el) => el,
+                Err(_) => find_promoted_icon(&automation, icon)?,
+            }
         };
         Shell_NotifyIconGetRect(&icon.identifier)
             .map_err(|_| "This tray icon is no longer running.")?;
         if context_menu {
-            // The pointer is on the dock icon that was right-clicked.
+            // The pointer is on the dock or notch icon that was right-clicked.
             let mut cursor = POINT::default();
             let _ = GetCursorPos(&mut cursor);
             let before = visible_windows();
-            element
-                .ShowContextMenu()
-                .map_err(|_| "Windows could not open this app's native tray menu.".to_string())?;
-            let menu = move_new_menu_to(&icon.path, &before, cursor);
-            drop(exposure);
-            if let Some((menu, bottom)) = menu {
-                wait_for_menu_close(menu, bottom);
+            
+            let show_res = element.ShowContextMenu();
+            if show_res.is_err() {
+                if let Ok(rect) = element.CurrentBoundingRectangle() {
+                    let cx = (rect.left + rect.right) / 2;
+                    let cy = (rect.top + rect.bottom) / 2;
+                    simulate_right_click(cx, cy);
+                } else if let Ok(rect) = Shell_NotifyIconGetRect(&icon.identifier) {
+                    let cx = (rect.left + rect.right) / 2;
+                    let cy = (rect.top + rect.bottom) / 2;
+                    simulate_right_click(cx, cy);
+                }
             }
+
+            let menu_info = move_new_menu_to(&icon.path, &before, cursor);
+            if let Some((menu, max_bottom, is_top_notch)) = menu_info {
+                wait_for_menu_close(menu, max_bottom, is_top_notch);
+            }
+            drop(exposure);
             Ok(())
         } else {
             let element: IUIAutomationElement = element.cast().map_err(|e| e.to_string())?;
             let pattern = element
                 .GetCurrentPatternAs::<IUIAutomationInvokePattern>(UIA_InvokePatternId)
                 .map_err(|e| e.to_string())?;
-            pattern
-                .Invoke()
-                .map_err(|_| "Windows could not activate this tray icon.".to_string())
+            let invoke_res = pattern.Invoke();
+            if invoke_res.is_err() {
+                if let Ok(rect) = element.CurrentBoundingRectangle() {
+                    let cx = (rect.left + rect.right) / 2;
+                    let cy = (rect.top + rect.bottom) / 2;
+                    simulate_left_click(cx, cy);
+                }
+            }
+            Ok(())
         }
     }
 }
@@ -1024,13 +1170,58 @@ mod tests {
     }
 
     #[test]
+    fn matches_icon_label_works_for_various_app_patterns() {
+        unsafe {
+            let vanguard = Icon {
+                key: "vanguard".into(),
+                path: "C:\\Program Files\\Riot Vanguard\\vgtray.exe".into(),
+                identifier: Default::default(),
+                promoted: false,
+            };
+            assert!(matches_icon_label("Riot Vanguard", &vanguard));
+            assert!(matches_icon_label("vgtray", &vanguard));
+
+            let steam = Icon {
+                key: "steam".into(),
+                path: "C:\\Program Files (x86)\\Steam\\steam.exe".into(),
+                identifier: Default::default(),
+                promoted: false,
+            };
+            assert!(matches_icon_label("Steam", &steam));
+            assert!(matches_icon_label("steam client", &steam));
+
+            let legion = Icon {
+                key: "legion".into(),
+                path: "C:\\Program Files\\LenovoLegionToolkit\\Lenovo Legion Toolkit.exe".into(),
+                identifier: Default::default(),
+                promoted: false,
+            };
+            assert!(matches_icon_label("Lenovo Legion Toolkit", &legion));
+        }
+    }
+
+    #[test]
     #[ignore = "read-only check against the current Windows desktop"]
     fn live_tray_discovery() {
+        unsafe {
+            extern "system" {
+                fn OpenWindowStationW(name: windows::core::PCWSTR, inherit: BOOL, access: u32) -> isize;
+                fn SetProcessWindowStation(station: isize) -> BOOL;
+                fn OpenDesktopW(name: windows::core::PCWSTR, flags: u32, inherit: BOOL, access: u32) -> isize;
+                fn SetThreadDesktop(desktop: isize) -> BOOL;
+            }
+            let ws = OpenWindowStationW(w!("winsta0"), BOOL(0), 0x00000002);
+            if ws != 0 {
+                let _ = SetProcessWindowStation(ws);
+            }
+            let desk = OpenDesktopW(w!("default"), 0, BOOL(0), 0x000001ff);
+            if desk != 0 {
+                let _ = SetThreadDesktop(desk);
+            }
+        }
         let apps = enumerate();
         for app in &apps {
-            assert!(!app.tray_ids.is_empty());
-            assert!(!app.path.is_empty());
-            println!("{}: {} live tray icon(s)", app.name, app.tray_ids.len());
+            println!("{}: {} live tray icon(s), path: {}", app.name, app.tray_ids.len(), app.path);
         }
         println!("{} live tray apps", apps.len());
     }

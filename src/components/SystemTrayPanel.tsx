@@ -35,6 +35,18 @@ export function SystemTrayPanel({ onBack, onPinChange }: SystemTrayPanelProps) {
 		onBack();
 	}, [onBack, onPinChange]);
 
+	useEffect(() => {
+		const handleKeyDown = (e: KeyboardEvent) => {
+			if (e.key === "Escape") {
+				handleBack();
+			}
+		};
+		window.addEventListener("keydown", handleKeyDown);
+		return () => {
+			window.removeEventListener("keydown", handleKeyDown);
+		};
+	}, [handleBack]);
+
 	const fetchTrayApps = useCallback(async () => {
 		try {
 			const list = await invoke<TrayApp[]>("get_tray_apps");
@@ -78,10 +90,17 @@ export function SystemTrayPanel({ onBack, onPinChange }: SystemTrayPanelProps) {
 				console.warn("Failed to focus window, trying tray activation:", e);
 			}
 		}
-		if (app.tray_ids.length === 0) return;
+		if (!app.tray_ids || app.tray_ids.length === 0) return;
 		setBusyId(app.tray_ids[0]);
 		try {
-			await invoke("activate_tray_icon", { trayId: app.tray_ids[0] });
+			for (const id of app.tray_ids) {
+				try {
+					await invoke("activate_tray_icon", { trayId: id });
+					return;
+				} catch (err) {
+					// try next tray id
+				}
+			}
 		} catch (e) {
 			console.error("Failed to activate tray icon:", e);
 		} finally {
@@ -92,11 +111,18 @@ export function SystemTrayPanel({ onBack, onPinChange }: SystemTrayPanelProps) {
 	const handleContextMenu = useCallback(async (e: React.MouseEvent, app: TrayApp) => {
 		e.preventDefault();
 		e.stopPropagation();
-		if (app.tray_ids.length === 0) return;
-		try {
-			await invoke("show_tray_context_menu", { trayId: app.tray_ids[0] });
-		} catch (e) {
-			console.error("Failed to show tray context menu:", e);
+		if (!app.tray_ids || app.tray_ids.length === 0) return;
+		let lastError = null;
+		for (const id of app.tray_ids) {
+			try {
+				await invoke("show_tray_context_menu", { trayId: id });
+				return;
+			} catch (e) {
+				lastError = e;
+			}
+		}
+		if (lastError) {
+			console.error("Failed to show tray context menu:", lastError);
 		}
 	}, []);
 

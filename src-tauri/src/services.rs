@@ -3823,6 +3823,9 @@ unsafe extern "system" fn mouse_hook_proc(
         {
             let cursor = (*(lparam.0 as *const MSLLHOOKSTRUCT)).pt;
             if !is_cursor_in_notch_rect(cursor) {
+                if let Some(app) = MOUSE_HOOK_APP_HANDLE.get() {
+                    let _ = app.emit("notch-outside-click", ());
+                }
                 if MH_LAST_MAIN_IGNORE.load(Ordering::Relaxed) == 0 {
                     if let Some(app) = MOUSE_HOOK_APP_HANDLE.get() {
                         if let Some(main_win) = app.get_webview_window("main") {

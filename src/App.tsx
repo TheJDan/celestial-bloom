@@ -82,6 +82,7 @@ import type { WidgetConfig } from "./components/StatusWidgetConfig";
 import { EdgeSurface } from "./components/EdgeSurface";
 import { JarvisIslandPill } from "./components/JarvisIslandPill";
 import { ShelfTypeIcon } from "./components/ShelfTypeIcon";
+import { DeskBoxHub } from "./components/DeskBoxHub";
 import { WifiPanel } from "./components/WifiPanel";
 import { BluetoothPanel } from "./components/BluetoothPanel";
 import { AudioOutputPanel } from "./components/AudioOutputPanel";
@@ -1518,11 +1519,18 @@ function App() {
 			releaseNotchHover();
 		});
 
+		// Low-level mouse hook emits this when the user clicks anywhere outside
+		// the notch bounds. Dismisses even pinned panels (like system tray or wifi).
+		const unlistenNotchOutsideClick = listen("notch-outside-click", () => {
+			dismissNotch();
+		});
+
 		return () => {
 			unlistenVisibility.then((f) => f());
 			unlistenNotchOverlap.then((f) => f());
 			unlistenNotchEdgeHover.then((f) => f());
 			unlistenNotchPointerLeft.then((f) => f());
+			unlistenNotchOutsideClick.then((f) => f());
 			document.removeEventListener("contextmenu", preventContext);
 		};
 	}, [windowLabel]);
@@ -1698,6 +1706,10 @@ function App() {
 			/* storage full or unavailable — shelf just won't persist */
 		}
 	}, [shelfItems, shelfPersist]);
+
+	// DeskBox Hub view switcher: allows toggling between active dropped files ("drops")
+	// and the DeskBox productivity hub ("deskbox" with Portals, Quick Notes, and Tasks).
+	const [shelfViewMode, setShelfViewMode] = useState<"drops" | "deskbox">("deskbox");
 
 	// Drop file references whose files are gone (moved/deleted/drive unplugged)
 	// once at startup, so a persisted shelf does not accumulate dead entries.
@@ -1941,6 +1953,35 @@ function App() {
 		);
 	};
 
+	// Force-closes the notch immediately on click outside, even when pinned by a view
+	const dismissNotch = () => {
+		notchPinnedRef.current = false;
+		releaseDeferredRef.current = false;
+		setIsHovered(false);
+		setIsNotchHovered(false);
+		if (isOpenRef.current) {
+			const panel = asNotchPanel(bloomModeRef.current);
+			if (panel && rememberPanelEnabledRef.current) rememberPanelRef.current(panel);
+			setIsOpen(false);
+		}
+		setBloomMode((prev) =>
+			prev === "music" ||
+			prev === "command-center" ||
+			prev === "calendar" ||
+			prev === "optimizer" ||
+			prev === "status" ||
+			prev === "shelf" ||
+			prev === "wifi" ||
+			prev === "bluetooth" ||
+			prev === "system-tray" ||
+			prev === "audio-output" ||
+			prev === "devices" ||
+			prev === "device"
+				? restingModeRef.current
+				: prev
+		);
+	};
+
 	const clearShelfCollapse = () => {
 		if (shelfCollapseTimer.current !== null) {
 			window.clearTimeout(shelfCollapseTimer.current);
@@ -1962,10 +2003,7 @@ function App() {
 		const next = shelfItems.filter((i) => i.id !== id);
 		setShelfItems(next);
 		if (next.length === 0 && bloomMode === "shelf") {
-			// Nothing left to show: an open notch moves to the remembered panel,
-			// a closed one to its resting mode, instead of an empty shelf.
-			clearShelfCollapse();
-			setBloomMode(isOpen ? openingPanel() : restingModeRef.current);
+			setShelfViewMode("deskbox");
 		}
 	};
 
@@ -2022,6 +2060,7 @@ function App() {
 		}
 		const added = fresh.slice(0, room);
 		markShelfNew(added.map((i) => i.id));
+		setShelfViewMode("drops");
 		setShelfItems([...added, ...prev]);
 	};
 
@@ -2040,6 +2079,7 @@ function App() {
 			timestamp: Date.now()
 		};
 		markShelfNew([item.id]);
+		setShelfViewMode("drops");
 		setShelfItems([item, ...prev]);
 	};
 
@@ -3372,7 +3412,7 @@ function App() {
 		if (bloomMode === "announcement" && announcement && !announcementDismissed) return 380;
 		if (bloomMode === "device" && deviceAlert) return 330;
 		if (isCalendarMode) return 480;
-		if (bloomMode === "shelf") return 380;
+		if (bloomMode === "shelf") return shelfViewMode === "deskbox" || shelfItems.length === 0 ? 410 : 380;
 		if (bloomMode === "optimizer" && isOpen) return 370;
 		if (bloomMode === "command-center" && isOpen) return 350;
 		if (bloomMode === "wifi" || bloomMode === "bluetooth" || bloomMode === "system-tray" || bloomMode === "audio-output" || bloomMode === "devices") return 360;
@@ -3415,7 +3455,7 @@ function App() {
 		// hover during an OS drag) and is sized to exactly one row of tiles,
 		// plus room for the scrollbar once the tiles overflow it.
 		if (bloomMode === "shelf") {
-			if (shelfItems.length === 0) return 130;
+			if (shelfViewMode === "deskbox" || shelfItems.length === 0) return 245;
 			return shelfOverflowing ? 190 : 176;
 		}
 		if (bloomMode === "optimizer") return isOpen ? 220 : 36;
@@ -4931,15 +4971,37 @@ function App() {
 											transition={{ type: "spring", stiffness: 400, damping: 30 }}
 										>
 											{shelfNotice && <div className="shelf-notice">{shelfNotice}</div>}
-											{shelfItems.length === 0 ? (
-												<div className="shelf-empty">
-													<span>Drop files or selected text here</span>
-												</div>
+											{shelfItems.length === 0 || shelfViewMode === "deskbox" ? (
+												<DeskBoxHub
+													droppedItemsCount={shelfItems.length}
+													onViewDroppedFiles={() => setShelfViewMode("drops")}
+												/>
 											) : (
-												<div
-													className={`shelf-items-grid ${shelfOverflowing ? "overflowing" : ""}`}
-													ref={shelfGridRef}
-												>
+												<>
+													<div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6, padding: "0 4px" }}>
+														<span style={{ fontSize: 11, fontWeight: 600, color: "rgba(255,255,255,0.7)" }}>
+															Drops ({shelfItems.length})
+														</span>
+														<button
+															onClick={() => setShelfViewMode("deskbox")}
+															style={{
+																background: "rgba(255,255,255,0.08)",
+																border: "1px solid rgba(255,255,255,0.12)",
+																color: "#60a5fa",
+																fontSize: 10,
+																fontWeight: 600,
+																padding: "2px 8px",
+																borderRadius: 5,
+																cursor: "pointer"
+															}}
+														>
+															Open DeskBox ➔
+														</button>
+													</div>
+													<div
+														className={`shelf-items-grid ${shelfOverflowing ? "overflowing" : ""}`}
+														ref={shelfGridRef}
+													>
 													<AnimatePresence mode="popLayout" onExitComplete={measureShelfOverflow}>
 														{shelfItems.map((item) => {
 															const preview = item.path ? shelfThumbs[item.path] : undefined;
@@ -5031,6 +5093,7 @@ function App() {
 														})}
 													</AnimatePresence>
 												</div>
+											</>
 											)}
 										</motion.div>
 									)}

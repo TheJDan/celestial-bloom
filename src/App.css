@@ -3395,6 +3395,23 @@ img {
 .caelestia-track-details {
 	width: 100%;
 	margin-bottom: 4px;
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+}
+
+.caelestia-app-badge {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+	background: rgba(255, 255, 255, 0.08);
+	border: 1px solid rgba(255, 255, 255, 0.1);
+	border-radius: 9999px;
+	padding: 2px 8px;
+	font-size: 10px;
+	font-weight: 600;
+	color: rgba(255, 255, 255, 0.85);
+	margin-bottom: 4px;
 }
 
 .caelestia-artist {
@@ -3405,6 +3422,42 @@ img {
 	overflow: hidden;
 	text-overflow: ellipsis;
 	margin-top: 2px;
+}
+
+.caelestia-vol-row {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	width: 130px;
+	margin: 5px auto 4px auto;
+}
+
+.caelestia-vol-track {
+	position: relative;
+	flex: 1;
+	height: 4px;
+	background: rgba(255, 255, 255, 0.12);
+	border-radius: 999px;
+	display: flex;
+	align-items: center;
+}
+
+.caelestia-vol-fill {
+	position: absolute;
+	left: 0;
+	height: 100%;
+	background: #38bdf8;
+	border-radius: 999px;
+	pointer-events: none;
+}
+
+.caelestia-vol-slider {
+	position: absolute;
+	width: 100%;
+	height: 100%;
+	opacity: 0;
+	cursor: pointer;
+	margin: 0;
 }
 
 .caelestia-wavy-row {
@@ -3444,7 +3497,7 @@ img {
 
 .caelestia-wave-fill {
 	fill: none;
-	stroke: var(--bloom-accent, #ff4d6d);
+	stroke: var(--bloom-accent, #38bdf8);
 	stroke-width: 2.4;
 	stroke-linecap: round;
 	transition: stroke-dashoffset 0.1s linear;

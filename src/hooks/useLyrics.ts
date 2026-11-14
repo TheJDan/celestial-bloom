@@ -370,7 +370,7 @@ export function useLyrics(
 							cand.artistName
 						)}&track_name=${encodeURIComponent(cand.trackName)}`;
 						const res = await fetch(getUrl, {
-							headers: { "User-Agent": "Bloom/3.10.0 (https://github.com/bloom)" }
+							headers: { "User-Agent": "CelestialBloom/1.0 (https://github.com/TheJDan/celestial-bloom)" }
 						});
 						if (res.ok) {
 							const data = await res.json();
@@ -403,7 +403,7 @@ export function useLyrics(
 						const query = `${cand.trackName} ${cand.artistName}`.trim();
 						const searchRes = await fetch(
 							`https://lrclib.net/api/search?q=${encodeURIComponent(query)}`,
-							{ headers: { "User-Agent": "Bloom/3.10.0 (https://github.com/bloom)" } }
+							{ headers: { "User-Agent": "CelestialBloom/1.0 (https://github.com/TheJDan/celestial-bloom)" } }
 						);
 						if (searchRes.ok) {
 							const items: any[] = await searchRes.json();
@@ -463,7 +463,7 @@ export function useLyrics(
 					try {
 						const fallbackRes = await fetch(
 							`https://lrclib.net/api/search?track_name=${encodeURIComponent(cand.trackName)}`,
-							{ headers: { "User-Agent": "Bloom/3.10.0 (https://github.com/bloom)" } }
+							{ headers: { "User-Agent": "CelestialBloom/1.0 (https://github.com/TheJDan/celestial-bloom)" } }
 						);
 						if (fallbackRes.ok) {
 							const fallbackItems: any[] = await fallbackRes.json();

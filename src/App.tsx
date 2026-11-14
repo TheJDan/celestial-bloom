@@ -116,6 +116,7 @@ import {
 	Bot,
 	Zap,
 	LayoutGrid,
+	Sliders,
 	CloudSun,
 	VolumeX,
 	Volume,
@@ -3773,11 +3774,19 @@ function App() {
 									>
 										<button
 											type="button"
-											className={`caelestia-tab ${bloomMode === "command-center" || bloomMode === "wifi" || bloomMode === "bluetooth" || bloomMode === "system-tray" || bloomMode === "audio-output" ? "active" : ""}`}
+											className={`caelestia-tab ${bloomMode === "command-center" ? "active" : ""}`}
 											onClick={() => setBloomMode("command-center")}
 										>
 											<LayoutGrid size={12} strokeWidth={2.2} />
 											<span>Dashboard</span>
+										</button>
+										<button
+											type="button"
+											className={`caelestia-tab ${bloomMode === "devices" || bloomMode === "wifi" || bloomMode === "bluetooth" || bloomMode === "system-tray" || bloomMode === "audio-output" ? "active" : ""}`}
+											onClick={() => setBloomMode("devices")}
+										>
+											<Sliders size={12} strokeWidth={2.2} />
+											<span>Controles</span>
 										</button>
 										<button
 											type="button"
@@ -3811,6 +3820,25 @@ function App() {
 									{isOpen ? (
 										bloomMode === "command-center" ? (
 											<motion.div
+												key="caelestia-default-dash"
+												initial={{ opacity: 0, scale: 0.98 }}
+												animate={{ opacity: 1, scale: 1 }}
+												exit={{ opacity: 0, scale: 0.98 }}
+												transition={{ duration: 0.15 }}
+												style={{ width: "100%", height: "100%" }}
+											>
+												<CaelestiaDashboard
+													mediaInfo={mediaInfo}
+													temperature={temperature}
+													weatherCondition={weatherCondition}
+													cityName={cityName}
+													onTogglePlayPause={togglePlayPause}
+													onNext={animateNext}
+													onPrev={animatePrev}
+												/>
+											</motion.div>
+										) : bloomMode === "devices" || bloomMode === "wifi" || bloomMode === "bluetooth" || bloomMode === "system-tray" || bloomMode === "audio-output" ? (
+											<motion.div
 												key="caelestia-command-center"
 												initial={{ opacity: 0, scale: 0.98 }}
 												animate={{ opacity: 1, scale: 1 }}
@@ -3818,7 +3846,12 @@ function App() {
 												transition={{ duration: 0.15 }}
 												style={{ width: "100%", height: "100%" }}
 											>
-												<CaelestiaCommandCenter />
+												<CaelestiaCommandCenter
+													volume={displayVolume}
+													onVolumeChange={handleVolumeChange}
+													brightness={currentBrightness / 100}
+													onBrightnessChange={(b) => handleBrightnessChange(Math.round(b * 100))}
+												/>
 											</motion.div>
 										) : bloomMode === "optimizer" ? (
 											<motion.div

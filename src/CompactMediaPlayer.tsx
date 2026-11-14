@@ -249,7 +249,7 @@ export function CompactMediaPlayer({
 										y1={55 + r1 * sin}
 										x2={55 + r2 * cos}
 										y2={55 + r2 * sin}
-										stroke="var(--bloom-accent, #ff4d6d)"
+										stroke="var(--bloom-accent, #38bdf8)"
 										strokeWidth="2.2"
 										strokeLinecap="round"
 									/>
@@ -286,10 +286,30 @@ export function CompactMediaPlayer({
 					</div>
 
 					<div className="caelestia-track-details">
+						<div className="caelestia-app-badge">
+							<MusicNoteIcon size={10} />
+							<span>{mediaInfo.artist?.includes("- Topic") ? "Brave" : "Spotify"}</span>
+						</div>
 						<TitleMarquee title={mediaInfo.has_media && mediaInfo.title ? mediaInfo.title : "Sin reproducción activa"} />
 						<span className="caelestia-artist">
 							{mediaInfo.has_media && mediaInfo.artist ? mediaInfo.artist : "Abre Spotify o un reproductor"}
 						</span>
+						<div className="caelestia-vol-row">
+							<VolumeLowIcon size={12} style={{ opacity: 0.6, flexShrink: 0 }} />
+							<div className="caelestia-vol-track">
+								<div className="caelestia-vol-fill" style={{ width: `${Math.round(volume * 100)}%` }} />
+								<input
+									type="range"
+									className="caelestia-vol-slider"
+									min={0}
+									max={1}
+									step={0.01}
+									value={volume}
+									onChange={(e) => onVolumeChange(parseFloat(e.target.value))}
+									onClick={(e) => e.stopPropagation()}
+								/>
+							</div>
+						</div>
 					</div>
 
 					{/* Wavy seek bar */}

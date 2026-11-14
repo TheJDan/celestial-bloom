@@ -27,10 +27,22 @@ interface SystemControls {
 	battery_state: string;
 }
 
-export const CaelestiaCommandCenter: React.FC = () => {
+interface CaelestiaCommandCenterProps {
+	volume?: number;
+	onVolumeChange?: (vol: number) => void;
+	brightness?: number;
+	onBrightnessChange?: (bri: number) => void;
+}
+
+export const CaelestiaCommandCenter: React.FC<CaelestiaCommandCenterProps> = ({
+	volume: propVolume,
+	onVolumeChange: propOnVolumeChange,
+	brightness: propBrightness,
+	onBrightnessChange: propOnBrightnessChange
+}) => {
 	const [controls, setControls] = useState<SystemControls>({
-		volume: 1.0,
-		brightness: 1.0,
+		volume: propVolume !== undefined ? propVolume : 1.0,
+		brightness: propBrightness !== undefined ? propBrightness : 1.0,
 		wifi_enabled: true,
 		wifi_connected: true,
 		wifi_name: "Conectado",
@@ -46,6 +58,9 @@ export const CaelestiaCommandCenter: React.FC = () => {
 	const lastBriInteractionRef = useRef<number>(0);
 	const lastVolInteractionRef = useRef<number>(0);
 
+	const activeVolume = propVolume !== undefined ? propVolume : controls.volume;
+	const activeBrightness = propBrightness !== undefined ? propBrightness : controls.brightness;
+
 	const fetchControls = useCallback(async () => {
 		try {
 			const [vol, bri] = await Promise.all([
@@ -55,13 +70,13 @@ export const CaelestiaCommandCenter: React.FC = () => {
 			const now = Date.now();
 			setControls((prev) => ({
 				...prev,
-				volume: now - lastVolInteractionRef.current < 1500 ? prev.volume : vol,
-				brightness: now - lastBriInteractionRef.current < 1500 ? prev.brightness : bri / 100
+				volume: propVolume !== undefined ? propVolume : (now - lastVolInteractionRef.current < 1500 ? prev.volume : vol),
+				brightness: propBrightness !== undefined ? propBrightness : (now - lastBriInteractionRef.current < 1500 ? prev.brightness : bri / 100)
 			}));
 		} catch {
 			// Fallback
 		}
-	}, []);
+	}, [propVolume, propBrightness]);
 
 	useEffect(() => {
 		fetchControls();
@@ -72,16 +87,24 @@ export const CaelestiaCommandCenter: React.FC = () => {
 	const handleVolumeChange = (newVal: number) => {
 		lastVolInteractionRef.current = Date.now();
 		setControls((c) => ({ ...c, volume: newVal }));
-		invoke("set_volume", { volume: newVal }).catch(() => {});
+		if (propOnVolumeChange) {
+			propOnVolumeChange(newVal);
+		} else {
+			invoke("set_volume", { volume: newVal }).catch(() => {});
+		}
 	};
 
 	const handleBrightnessChange = (newVal: number) => {
 		lastBriInteractionRef.current = Date.now();
 		setControls((c) => ({ ...c, brightness: newVal }));
-		if (briThrottleRef.current) clearTimeout(briThrottleRef.current);
-		briThrottleRef.current = setTimeout(() => {
-			invoke("set_brightness", { brightness: Math.round(newVal * 100) }).catch(() => {});
-		}, 40) as unknown as number;
+		if (propOnBrightnessChange) {
+			propOnBrightnessChange(newVal);
+		} else {
+			if (briThrottleRef.current) clearTimeout(briThrottleRef.current);
+			briThrottleRef.current = setTimeout(() => {
+				invoke("set_brightness", { brightness: Math.round(newVal * 100) }).catch(() => {});
+			}, 40) as unknown as number;
+		}
 	};
 
 	const toggleWifi = async () => {
@@ -318,7 +341,7 @@ export const CaelestiaCommandCenter: React.FC = () => {
 				{/* Volume Slider */}
 				<div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
 					<button
-						onClick={() => handleVolumeChange(controls.volume > 0 ? 0 : 0.7)}
+						onClick={() => handleVolumeChange(activeVolume > 0 ? 0 : 0.7)}
 						style={{
 							background: "transparent",
 							border: "none",
@@ -329,7 +352,7 @@ export const CaelestiaCommandCenter: React.FC = () => {
 							alignItems: "center"
 						}}
 					>
-						{controls.volume === 0 ? <VolumeX size={16} /> : <Volume2 size={16} />}
+						{activeVolume === 0 ? <VolumeX size={16} /> : <Volume2 size={16} />}
 					</button>
 					<div
 						style={{
@@ -347,7 +370,7 @@ export const CaelestiaCommandCenter: React.FC = () => {
 								top: 0,
 								left: 0,
 								height: "100%",
-								width: `${Math.round(controls.volume * 100)}%`,
+								width: `${Math.round(activeVolume * 100)}%`,
 								background: "#FFFFFF",
 								borderRadius: "999px"
 							}}
@@ -357,7 +380,7 @@ export const CaelestiaCommandCenter: React.FC = () => {
 							min="0"
 							max="1"
 							step="0.01"
-							value={controls.volume}
+							value={activeVolume}
 							onChange={(e) => handleVolumeChange(parseFloat(e.target.value))}
 							style={{
 								position: "absolute",
@@ -372,7 +395,7 @@ export const CaelestiaCommandCenter: React.FC = () => {
 						/>
 					</div>
 					<span style={{ fontSize: "11px", fontWeight: 600, width: "34px", textAlign: "right", color: "rgba(255, 255, 255, 0.8)" }}>
-						{Math.round(controls.volume * 100)}%
+						{Math.round(activeVolume * 100)}%
 					</span>
 				</div>
 
@@ -395,7 +418,7 @@ export const CaelestiaCommandCenter: React.FC = () => {
 								top: 0,
 								left: 0,
 								height: "100%",
-								width: `${Math.round(controls.brightness * 100)}%`,
+								width: `${Math.round(activeBrightness * 100)}%`,
 								background: "#FFFFFF",
 								borderRadius: "999px"
 							}}
@@ -405,7 +428,7 @@ export const CaelestiaCommandCenter: React.FC = () => {
 							min="0.05"
 							max="1"
 							step="0.01"
-							value={controls.brightness}
+							value={activeBrightness}
 							onChange={(e) => handleBrightnessChange(parseFloat(e.target.value))}
 							style={{
 								position: "absolute",
@@ -420,7 +443,7 @@ export const CaelestiaCommandCenter: React.FC = () => {
 						/>
 					</div>
 					<span style={{ fontSize: "11px", fontWeight: 600, width: "34px", textAlign: "right", color: "rgba(255, 255, 255, 0.8)" }}>
-						{Math.round(controls.brightness * 100)}%
+						{Math.round(activeBrightness * 100)}%
 					</span>
 				</div>
 			</div>

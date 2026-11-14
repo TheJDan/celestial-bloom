@@ -3439,16 +3439,10 @@ function App() {
 		return `${(bytes / (1024 * 1024)).toFixed(1)}M`;
 	};
 
-	// Detect if playing media is likely web video, reels, shorts, or non-music
-	const isWebOrReelMedia = isLikelyNonMusicVideo(mediaInfo.title, mediaInfo.artist);
-
-	// Music mode shows any time we have genuine song info (playing or paused) and music mode setting is enabled
-	const isMusicMode = (!isWebOrReelMedia && mediaInfo.has_media && bloomMode === "music" && settingsMusicModeEnabled) || (isOpen && bloomMode === "music");
-	// A media session remains reachable on hover after its activity fades, or
-	// whenever the compact music display is disabled.
+	// Media mode shows whenever media is active (music or web videos/YouTube)
+	const isMusicMode = (mediaInfo.has_media && (bloomMode === "music" || isPlaying) && settingsMusicModeEnabled) || (isOpen && bloomMode === "music");
 	const showMusicOnStatusHover =
-		!isOpen && isHovered && bloomMode === "status" && settingsMusicModeEnabled && !isWebOrReelMedia &&
-		mediaInfo.has_media && (!musicActivityVisible || !settingsMusicCompactNotch);
+		!isOpen && isHovered && settingsMusicModeEnabled && mediaInfo.has_media;
 	const showCompactMusicIcons = isMusicMode || showMusicOnStatusHover;
 
 	// The 24-hour clock is ~16px narrower than the 12-hour one.
@@ -3470,6 +3464,9 @@ function App() {
 
 		// When notch is closed / resting in status pill mode
 		if (!isOpen) {
+			if (showCompactMusicIcons && mediaInfo.title && (isPlaying || isHovered)) {
+				return 340;
+			}
 			if (showCompactMusicIcons) {
 				let w = 176 - clock24hTrim;
 				if (settingsVisualizerEnabled && isPlaying) w += 36;
@@ -3966,6 +3963,142 @@ function App() {
 																</span>
 															</motion.div>
 														)
+													) : showCompactMusicIcons && mediaInfo.title && (isPlaying || isHovered) ? (
+														<motion.div
+															key="media-peek-view"
+															className="main-row-inner"
+															initial={{ opacity: 0 }}
+															animate={{ opacity: 1 }}
+															exit={{ opacity: 0 }}
+															style={{
+																width: "100%",
+																height: "100%",
+																display: "flex",
+																alignItems: "center",
+																justifyContent: "space-between",
+																padding: "0 10px 0 8px",
+																gap: "8px",
+																position: "relative",
+																overflow: "hidden"
+															}}
+														>
+															{/* Left: Thumbnail / Album Art */}
+															{albumArtUrl ? (
+																<img
+																	src={albumArtUrl}
+																	alt=""
+																	style={{
+																		width: 28,
+																		height: 28,
+																		borderRadius: 7,
+																		objectFit: "cover",
+																		flexShrink: 0
+																	}}
+																/>
+															) : (
+																<div
+																	style={{
+																		width: 28,
+																		height: 28,
+																		borderRadius: 7,
+																		backgroundColor: "rgba(255,255,255,0.1)",
+																		display: "flex",
+																		alignItems: "center",
+																		justifyContent: "center",
+																		flexShrink: 0
+																	}}
+																>
+																	<Music size={14} />
+																</div>
+															)}
+
+															{/* Center: Title & Artist / Channel */}
+															<div
+																style={{
+																	flex: 1,
+																	minWidth: 0,
+																	display: "flex",
+																	flexDirection: "column",
+																	justifyContent: "center",
+																	textAlign: "left"
+																}}
+															>
+																<span
+																	style={{
+																		fontSize: 12,
+																		fontWeight: 600,
+																		color: "#ffffff",
+																		whiteSpace: "nowrap",
+																		overflow: "hidden",
+																		textOverflow: "ellipsis",
+																		lineHeight: 1.25
+																	}}
+																	title={mediaInfo.title}
+																>
+																	{mediaInfo.title}
+																</span>
+																<span
+																	style={{
+																		fontSize: 11,
+																		color: "rgba(255,255,255,0.55)",
+																		whiteSpace: "nowrap",
+																		overflow: "hidden",
+																		textOverflow: "ellipsis",
+																		lineHeight: 1.25
+																	}}
+																>
+																	{mediaInfo.artist || "Reproduciendo"}
+																</span>
+															</div>
+
+															{/* Right: Play/Pause Button */}
+															<button
+																type="button"
+																onClick={(e) => {
+																	e.stopPropagation();
+																	togglePlayPause();
+																}}
+																style={{
+																	background: "none",
+																	border: "none",
+																	color: "#ffffff",
+																	cursor: "pointer",
+																	padding: "4px",
+																	display: "flex",
+																	alignItems: "center",
+																	justifyContent: "center",
+																	flexShrink: 0
+																}}
+																title={isPlaying ? "Pausar" : "Reproducir"}
+															>
+																{isPlaying ? (
+																	<Pause size={14} fill="currentColor" />
+																) : (
+																	<Play size={14} fill="currentColor" />
+																)}
+															</button>
+
+															{/* Bottom: Thin Seek / Progress Bar */}
+															<div
+																style={{
+																	position: "absolute",
+																	bottom: 0,
+																	left: 0,
+																	right: 0,
+																	height: 2.5,
+																	backgroundColor: "rgba(255, 255, 255, 0.15)"
+																}}
+															>
+																<div
+																	style={{
+																		height: "100%",
+																		width: `${mediaInfo.duration_ms && mediaInfo.duration_ms > 0 ? Math.min(100, Math.max(0, (livePositionMs / mediaInfo.duration_ms) * 100)) : (isPlaying ? 25 : 0)}%`,
+																		backgroundColor: "var(--md-sys-color-primary, #ffffff)",
+																		transition: "width 0.25s linear"
+																	}}
+																/>
+															</div>
+														</motion.div>
 													) : (
 														<motion.div
 															key="standard-view"

@@ -3671,14 +3671,12 @@ pub fn set_brightness(app: AppHandle, brightness: u32) {
     let val = brightness.min(100);
     crate::state::CURRENT_BRIGHTNESS.store(val, Ordering::Relaxed);
     crate::state::LAST_BRIGHTNESS_CHANGE.store(crate::utils::get_now_ms(), Ordering::Relaxed);
-    let _ = save_setting(app.clone(), "bloom-last-brightness".to_string(), serde_json::Value::from(val));
-    let _ = app.emit(
-        "brightness-change",
-        BrightnessChangeEvent { brightness: val },
-    );
     if let Some(tx) = crate::state::BRIGHTNESS_SENDER.get() {
         let _ = tx.send(val);
     }
+    tauri::async_runtime::spawn(async move {
+        let _ = save_setting(app, "bloom-last-brightness".to_string(), serde_json::Value::from(val));
+    });
 }
 
 #[tauri::command]

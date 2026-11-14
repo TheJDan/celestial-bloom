@@ -1,4 +1,5 @@
-import React, { useEffect, useState, useCallback } from "react";
+import React, { useEffect, useState, useCallback, useRef } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import {
 	Wifi,
 	WifiOff,
@@ -38,59 +39,49 @@ export const CaelestiaCommandCenter: React.FC = () => {
 		battery_state: "charging"
 	});
 
-	const [isDraggingVol, setIsDraggingVol] = useState(false);
-	const [isDraggingBri, setIsDraggingBri] = useState(false);
 	const [dockMode, setDockMode] = useState<string>(() => localStorage.getItem("bloom-dock-mode") || "fixed");
 	const [dndActive, setDndActive] = useState<boolean>(() => localStorage.getItem("caelestia-dnd") === "true");
 
+	const briThrottleRef = useRef<number | null>(null);
+	const lastBriInteractionRef = useRef<number>(0);
+	const lastVolInteractionRef = useRef<number>(0);
+
 	const fetchControls = useCallback(async () => {
 		try {
-			const res = await fetch("http://127.0.0.1:5180/api/controls");
-			if (res.ok) {
-				const data = await res.json();
-				setControls((prev) => ({
-					...prev,
-					...data,
-					// Don't overwrite while user is actively sliding
-					volume: isDraggingVol ? prev.volume : data.volume,
-					brightness: isDraggingBri ? prev.brightness : data.brightness
-				}));
-			}
+			const [vol, bri] = await Promise.all([
+				invoke<number>("get_volume").catch(() => 0.5),
+				invoke<number>("get_brightness").catch(() => 100)
+			]);
+			const now = Date.now();
+			setControls((prev) => ({
+				...prev,
+				volume: now - lastVolInteractionRef.current < 1500 ? prev.volume : vol,
+				brightness: now - lastBriInteractionRef.current < 1500 ? prev.brightness : bri / 100
+			}));
 		} catch {
-			// Local fallback
+			// Fallback
 		}
-	}, [isDraggingVol, isDraggingBri]);
+	}, []);
 
 	useEffect(() => {
 		fetchControls();
-		const interval = setInterval(fetchControls, 3000);
+		const interval = setInterval(fetchControls, 4000);
 		return () => clearInterval(interval);
 	}, [fetchControls]);
 
-	const handleVolumeChange = async (newVal: number) => {
+	const handleVolumeChange = (newVal: number) => {
+		lastVolInteractionRef.current = Date.now();
 		setControls((c) => ({ ...c, volume: newVal }));
-		try {
-			await fetch("http://127.0.0.1:5180/api/set_volume", {
-				method: "POST",
-				headers: { "Content-Type": "application/json" },
-				body: JSON.stringify({ volume: newVal })
-			});
-		} catch {
-			// ignore
-		}
+		invoke("set_volume", { volume: newVal }).catch(() => {});
 	};
 
-	const handleBrightnessChange = async (newVal: number) => {
+	const handleBrightnessChange = (newVal: number) => {
+		lastBriInteractionRef.current = Date.now();
 		setControls((c) => ({ ...c, brightness: newVal }));
-		try {
-			await fetch("http://127.0.0.1:5180/api/set_brightness", {
-				method: "POST",
-				headers: { "Content-Type": "application/json" },
-				body: JSON.stringify({ brightness: newVal })
-			});
-		} catch {
-			// ignore
-		}
+		if (briThrottleRef.current) clearTimeout(briThrottleRef.current);
+		briThrottleRef.current = setTimeout(() => {
+			invoke("set_brightness", { brightness: Math.round(newVal * 100) }).catch(() => {});
+		}, 40) as unknown as number;
 	};
 
 	const toggleWifi = async () => {
@@ -367,8 +358,6 @@ export const CaelestiaCommandCenter: React.FC = () => {
 							max="1"
 							step="0.01"
 							value={controls.volume}
-							onMouseDown={() => setIsDraggingVol(true)}
-							onMouseUp={() => setIsDraggingVol(false)}
 							onChange={(e) => handleVolumeChange(parseFloat(e.target.value))}
 							style={{
 								position: "absolute",
@@ -417,8 +406,6 @@ export const CaelestiaCommandCenter: React.FC = () => {
 							max="1"
 							step="0.01"
 							value={controls.brightness}
-							onMouseDown={() => setIsDraggingBri(true)}
-							onMouseUp={() => setIsDraggingBri(false)}
 							onChange={(e) => handleBrightnessChange(parseFloat(e.target.value))}
 							style={{
 								position: "absolute",

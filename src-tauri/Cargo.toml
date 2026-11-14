@@ -31,6 +31,7 @@ windows = { version = "0.61", features = [
 	"Win32_UI_Shell_PropertiesSystem",
 	"Win32_Storage_Packaging_Appx",
 	"Win32_UI_WindowsAndMessaging",
+	"Win32_UI_Controls",
 	"Win32_UI_HiDpi",
 	"Win32_Foundation",
 	"Win32_System_Com",
@@ -93,11 +94,12 @@ tauri-plugin-drag = "2.1.1"
 tauri-plugin-dialog = "2"
 rustfft = "6"
 com-policy-config = "0.6.0"
+material-colors = { version = "0.5.0", features = ["quantize", "serde"] }
 
 [profile.release]
 opt-level = 3
-lto = "thin"
-codegen-units = 1
+lto = false
+codegen-units = 16
 strip = true
 panic = "abort"
 

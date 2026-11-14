@@ -99,6 +99,10 @@ pub async fn shelf_thumbnail(path: String) -> crate::shelf_preview::ShelfPreview
 /// which an empty capability would deny for every file.
 #[tauri::command]
 pub async fn shelf_open(path: String) -> Result<(), String> {
+    unsafe {
+        use windows::Win32::UI::WindowsAndMessaging::{AllowSetForegroundWindow, ASFW_ANY};
+        let _ = AllowSetForegroundWindow(ASFW_ANY);
+    }
     tauri_plugin_opener::open_path(&path, None::<&str>).map_err(|e| e.to_string())
 }
 
@@ -164,6 +168,82 @@ pub async fn update_notch_rect(rect: IntRect) {
     if let Ok(mut r) = NOTCH_RECT.lock() {
         *r = Some(rect);
     }
+}
+
+#[tauri::command]
+pub async fn update_notch_hit_rects(rects: Vec<IntRect>) {
+    if let Ok(mut r) = crate::state::NOTCH_HIT_RECTS.lock() {
+        *r = rects;
+    }
+}
+
+#[derive(serde::Serialize, Clone, Debug)]
+pub struct CaelestiaPalette {
+    pub primary: String,
+    pub on_primary: String,
+    pub surface: String,
+    pub surface_container: String,
+    pub on_surface: String,
+    pub outline: String,
+}
+
+fn get_windows_wallpaper_path() -> Option<String> {
+    let mut buffer = [0u16; 260];
+    unsafe {
+        use windows::Win32::UI::WindowsAndMessaging::{
+            SystemParametersInfoW, SPI_GETDESKWALLPAPER, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
+        };
+        let ok = SystemParametersInfoW(
+            SPI_GETDESKWALLPAPER,
+            buffer.len() as u32,
+            Some(buffer.as_mut_ptr() as *mut _),
+            SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+        );
+        if ok.is_ok() {
+            let len = buffer.iter().position(|&c| c == 0).unwrap_or(buffer.len());
+            return Some(String::from_utf16_lossy(&buffer[..len]));
+        }
+    }
+    None
+}
+
+#[tauri::command]
+pub fn get_material_palette() -> Result<CaelestiaPalette, String> {
+    use std::io::Cursor;
+    use image::{ImageReader, imageops::FilterType};
+    use material_colors::{
+        color::Rgb, image::extract_color, theme::ThemeBuilder,
+    };
+
+    let path = get_windows_wallpaper_path().ok_or("No se pudo obtener el wallpaper")?;
+    let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
+
+    let img = ImageReader::new(Cursor::new(bytes))
+        .with_guessed_format()
+        .map_err(|e| e.to_string())?
+        .decode()
+        .map_err(|e| e.to_string())?
+        .resize(128, 128, FilterType::Lanczos3)
+        .into_rgb8();
+
+    let pixels: Vec<Rgb> = img
+        .into_raw()
+        .chunks_exact(3)
+        .map(|c| Rgb::new(c[0], c[1], c[2]))
+        .collect();
+
+    let source_color = extract_color(&pixels);
+    let theme = ThemeBuilder::with_source(source_color).build();
+    let dark = theme.schemes.dark;
+
+    Ok(CaelestiaPalette {
+        primary: format!("#{:06x}", dark.primary.as_u32() & 0xFFFFFF),
+        on_primary: format!("#{:06x}", dark.on_primary.as_u32() & 0xFFFFFF),
+        surface: format!("#{:06x}", dark.surface.as_u32() & 0xFFFFFF),
+        surface_container: format!("#{:06x}", dark.surface_container.as_u32() & 0xFFFFFF),
+        on_surface: format!("#{:06x}", dark.on_surface.as_u32() & 0xFFFFFF),
+        outline: format!("#{:06x}", dark.outline.as_u32() & 0xFFFFFF),
+    })
 }
 
 #[tauri::command]
@@ -660,6 +740,7 @@ pub fn is_start_menu_open() -> bool {
 /// The mouse hook records whether Start was open at this click's press: if it
 /// was, the press closed it and the click leaves it closed, however long the
 /// button was held.
+#[allow(dead_code)]
 fn toggle_start_menu() {
     // Taken here, so a press is only ever used by the click it started.
     let open_at_press = START_OPEN_AT_PRESS.swap(false, Ordering::Relaxed);
@@ -691,7 +772,10 @@ send_key_tap(VK_ESCAPE);
 #[tauri::command]
 pub async fn open_app(app: AppHandle, app_name: String) {
     if app_name == "start" {
-        toggle_start_menu();
+        let app_clone = app.clone();
+        let _ = app.run_on_main_thread(move || {
+            toggle_spotlight(app_clone);
+        });
         return;
     }
 
@@ -700,7 +784,14 @@ pub async fn open_app(app: AppHandle, app_name: String) {
         return;
     }
 
-    tauri::async_runtime::spawn_blocking(move || launch_path(&app_name));
+    unsafe {
+        use windows::Win32::UI::WindowsAndMessaging::{AllowSetForegroundWindow, ASFW_ANY};
+        let _ = AllowSetForegroundWindow(ASFW_ANY);
+    }
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let _ = launch_path(&app_name);
+    });
 }
 
 fn is_bloom_launch_target(target: &str, identifier: &str) -> bool {
@@ -721,7 +812,7 @@ pub async fn launch_new_instance(app_path: String, app_name: Option<String>) {
             return;
         }
         let target = pwa_launch_target(&app_path, app_name.as_deref()).unwrap_or(app_path);
-        launch_path(&target);
+        let _ = launch_path(&target);
     });
 }
 
@@ -751,7 +842,7 @@ fn is_pwa_shortcut_for(app: &AppInfo, name: &str, host_exe: &str) -> bool {
 }
 
 /// Opens a file path, shortcut, or shell application id through the shell.
-fn launch_path(path: &str) {
+fn launch_path(path: &str) -> Result<(), String> {
     unsafe {
         use windows::Win32::UI::Shell::ShellExecuteW;
         use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
@@ -779,9 +870,11 @@ fn launch_path(path: &str) {
                 SW_SHOWNORMAL,
             );
             if res.0 as usize <= 32 {
-                eprintln!("Failed to open {}: error code {}", target, res.0 as usize);
+                let err = format!("Failed to open {}: error code {}", target, res.0 as usize);
+                eprintln!("[Bloom] {}", err);
+                return Err(err);
             }
-            return;
+            return Ok(());
         }
 
         if let Some(uwp_cmd) = crate::commands::get_uwp_launch_cmd(path) {
@@ -797,12 +890,14 @@ fn launch_path(path: &str) {
             );
 
             if res.0 as usize <= 32 {
-                eprintln!(
+                let err = format!(
                     "Failed to open UWP app {}: error code {}",
                     uwp_cmd, res.0 as usize
                 );
+                eprintln!("[Bloom] {}", err);
+                return Err(err);
             }
-            return;
+            return Ok(());
         }
 
         use std::path::Path;
@@ -839,11 +934,14 @@ fn launch_path(path: &str) {
         );
 
         if res.0 as usize <= 32 {
-            eprintln!(
+            let err = format!(
                 "Failed to open app {}: error code {}",
                 final_path, res.0 as usize
             );
+            eprintln!("[Bloom] {}", err);
+            return Err(err);
         }
+        Ok(())
     }
 }
 
@@ -4914,15 +5012,21 @@ pub async fn get_alt_tab_windows(app: AppHandle) -> Vec<AltTabItem> {
 
             // 6. Active popup check
             let popup = unsafe { GetLastActivePopup(hwnd) };
-            let target_hwnd = if !popup.0.is_null() && unsafe { IsWindowVisible(popup).as_bool() } {
+            let mut target_hwnd = if !popup.0.is_null() && unsafe { IsWindowVisible(popup).as_bool() } {
                 popup
             } else {
                 hwnd
             };
 
-            // 7. Non-empty title check
+            // 7. Non-empty title check (with fallback to main window if popup has no title)
             let mut text = [0u16; 512];
-            let len = unsafe { GetWindowTextW(target_hwnd, &mut text) };
+            let mut len = unsafe { GetWindowTextW(target_hwnd, &mut text) };
+            if len == 0 && target_hwnd != hwnd {
+                len = unsafe { GetWindowTextW(hwnd, &mut text) };
+                if len > 0 {
+                    target_hwnd = hwnd;
+                }
+            }
             if len == 0 {
                 continue;
             }
@@ -4942,13 +5046,35 @@ pub async fn get_alt_tab_windows(app: AppHandle) -> Vec<AltTabItem> {
                 continue;
             }
 
-            // Window dimension check (skip invisible or 0x0/16x16 dummy message windows)
-            let mut rect = windows::Win32::Foundation::RECT::default();
-            unsafe { let _ = windows::Win32::UI::WindowsAndMessaging::GetWindowRect(target_hwnd, &mut rect); };
-            let width = rect.right - rect.left;
-            let height = rect.bottom - rect.top;
-            if width <= 32 || height <= 32 {
-                continue;
+            // Window dimension check
+            // Note: Minimized windows in Win32 report client rect height <= 32 or (-32000, -32000).
+            let is_minimized = unsafe { IsIconic(hwnd).as_bool() || IsIconic(target_hwnd).as_bool() };
+            if is_minimized {
+                let mut wp = windows::Win32::UI::WindowsAndMessaging::WINDOWPLACEMENT {
+                    length: std::mem::size_of::<windows::Win32::UI::WindowsAndMessaging::WINDOWPLACEMENT>() as u32,
+                    ..Default::default()
+                };
+                if unsafe { windows::Win32::UI::WindowsAndMessaging::GetWindowPlacement(target_hwnd, &mut wp).is_ok() } {
+                    let w = wp.rcNormalPosition.right - wp.rcNormalPosition.left;
+                    let h = wp.rcNormalPosition.bottom - wp.rcNormalPosition.top;
+                    if w <= 32 || h <= 32 {
+                        continue;
+                    }
+                }
+            } else {
+                let mut rect = windows::Win32::Foundation::RECT::default();
+                unsafe { let _ = windows::Win32::UI::WindowsAndMessaging::GetWindowRect(target_hwnd, &mut rect); };
+                let mut width = rect.right - rect.left;
+                let mut height = rect.bottom - rect.top;
+                if (width <= 32 || height <= 32) && target_hwnd != hwnd {
+                    unsafe { let _ = windows::Win32::UI::WindowsAndMessaging::GetWindowRect(hwnd, &mut rect); };
+                    width = rect.right - rect.left;
+                    height = rect.bottom - rect.top;
+                    target_hwnd = hwnd;
+                }
+                if width <= 32 || height <= 32 {
+                    continue;
+                }
             }
 
             // 8. Class name check
@@ -5109,7 +5235,7 @@ pub async fn switch_to_window(hwnd: isize, app: AppHandle) -> Result<(), String>
 
     tauri::async_runtime::spawn_blocking(move || unsafe {
         use windows::Win32::Foundation::HWND;
-        use windows::Win32::UI::Input::KeyboardAndMouse::{keybd_event, SetActiveWindow, SetFocus, KEYEVENTF_KEYUP, VK_MENU};
+        use windows::Win32::UI::Input::KeyboardAndMouse::{SetActiveWindow, SetFocus};
         use windows::Win32::UI::WindowsAndMessaging::{
             AllowSetForegroundWindow, BringWindowToTop, GetForegroundWindow,
             GetWindowThreadProcessId, IsIconic, SetForegroundWindow,
@@ -5163,11 +5289,7 @@ pub async fn switch_to_window(hwnd: isize, app: AppHandle) -> Result<(), String>
             let _ = ShowWindow(target_hwnd, SW_SHOW);
         }
 
-        // 4. Synthesize an Alt press/release to grant foreground activation privilege
-        keybd_event(VK_MENU.0 as u8, 0, Default::default(), 0);
-        keybd_event(VK_MENU.0 as u8, 0, KEYEVENTF_KEYUP, 0);
-
-        // 5. Bring to top and set foreground
+        // 4. Bring to top and set foreground without synthesizing naked Alt keys (preventing SC_KEYMENU)
         let _ = BringWindowToTop(target_hwnd);
         let _ = SetForegroundWindow(target_hwnd);
 
@@ -5239,6 +5361,10 @@ pub async fn show_3d_switcher(app: AppHandle) -> Result<(), String> {
         let _ = win.set_ignore_cursor_events(false);
         let _ = win.show();
         if let Ok(hwnd) = win.hwnd() {
+            unsafe {
+                use windows::Win32::Graphics::Gdi::SetWindowRgn;
+                let _ = SetWindowRgn(hwnd, None, true);
+            }
             crate::utils::activate_and_focus_window(hwnd);
         }
         let _ = win.set_focus();
@@ -5340,17 +5466,238 @@ pub fn close_quick_look(app: AppHandle) {
     }
 }
 
+pub static SPOTLIGHT_SESSION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 #[tauri::command]
-pub fn close_spotlight(app: AppHandle) {
-    crate::services::SPOTLIGHT_ACTIVE.store(false, Ordering::Relaxed);
-    let _ = app.emit_to("overlay", "spotlight-close", ());
+pub fn open_spotlight(app: AppHandle) {
+    let fg = unsafe { windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow() };
+    let mut is_cloaked = false;
+    if !fg.0.is_null() && unsafe { windows::Win32::UI::WindowsAndMessaging::IsWindowVisible(fg).as_bool() } {
+        use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED};
+        let mut cloaked = 0u32;
+        is_cloaked = unsafe {
+            DwmGetWindowAttribute(
+                fg,
+                DWMWA_CLOAKED,
+                &mut cloaked as *mut _ as *mut _,
+                std::mem::size_of::<u32>() as u32,
+            )
+            .is_ok()
+                && cloaked != 0
+        };
+
+        let mut fg_pid = 0u32;
+        let my_pid = std::process::id();
+        unsafe {
+            windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId(fg, Some(&mut fg_pid));
+        }
+        let is_bloom = fg_pid == my_pid;
+
+        let mut class_name = [0u16; 256];
+        let len = unsafe {
+            windows::Win32::UI::WindowsAndMessaging::GetClassNameW(fg, &mut class_name)
+        };
+
+        if !is_cloaked && !is_bloom && len > 0 {
+            let class_str = String::from_utf16_lossy(&class_name[..len as usize]);
+            let is_shell_or_transient = class_str == "Shell_TrayWnd"
+                || class_str == "Shell_SecondaryTrayWnd"
+                || class_str == "Progman"
+                || class_str == "WorkerW"
+                || class_str == "Windows.UI.Core.CoreWindow"
+                || class_str == "XamlExplorerHostIslandWindow"
+                || class_str == "TopLevelWindowForOverflowXamlIsland";
+
+            if !is_shell_or_transient {
+                crate::services::CURRENT_ACTIVE_HWND.store(fg.0 as isize, Ordering::SeqCst);
+            }
+        }
+    }
+    crate::services::SPOTLIGHT_ACTIVE.store(true, Ordering::SeqCst);
+    let session = SPOTLIGHT_SESSION.fetch_add(1, Ordering::SeqCst) + 1;
+    eprintln!("[Bloom:Spotlight] open_spotlight session={session} prev_fg={:?} is_cloaked={is_cloaked}", fg.0);
+    let mut focus_acquired = false;
     if let Some(win) = app.get_webview_window("overlay") {
+        crate::services::sync_overlays(&app);
+        let _ = win.set_ignore_cursor_events(false);
+        let _ = win.show();
+        let _ = win.unminimize();
+        let _ = win.set_focus();
+        if let Ok(hwnd) = win.hwnd() {
+            crate::services::OVERLAY_HWND.store(hwnd.0 as isize, Ordering::SeqCst);
+            focus_acquired = crate::utils::activate_and_focus_window(hwnd);
+        }
+    }
+    if !focus_acquired {
+        eprintln!("[Bloom] Could not verify foreground focus for Spotlight overlay; closing to prevent desync.");
+        close_spotlight(app, Some(false), None);
+        return;
+    }
+    let _ = app.emit_to("overlay", "spotlight-toggle", session);
+}
+
+fn overlay_is_foreground(app: &AppHandle) -> bool {
+    if let Some(ov) = app.get_webview_window("overlay") {
+        if let Ok(hwnd) = ov.hwnd() {
+            unsafe {
+                use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, IsWindowVisible};
+                let fg = GetForegroundWindow();
+                let vis = IsWindowVisible(hwnd).as_bool();
+                let is_fg = fg == hwnd && vis;
+                eprintln!("[Bloom:Spotlight] overlay_is_foreground: fg={:?} ov={:?} vis={vis} is_fg={is_fg}", fg.0, hwnd.0);
+                return is_fg;
+            }
+        } else {
+            eprintln!("[Bloom:Spotlight] overlay_is_foreground: failed to get overlay hwnd");
+        }
+    } else {
+        eprintln!("[Bloom:Spotlight] overlay_is_foreground: overlay window not found");
+    }
+    false
+}
+
+#[tauri::command]
+pub fn toggle_spotlight(app: AppHandle) {
+    let active = crate::services::SPOTLIGHT_ACTIVE.load(Ordering::SeqCst);
+    let stale = active && !overlay_is_foreground(&app);
+    eprintln!("[Bloom:Spotlight] toggle_spotlight active={active} stale={stale}");
+    if active && !stale {
+        close_spotlight(app, Some(true), None);
+    } else {
+        open_spotlight(app);
+    }
+}
+
+#[tauri::command]
+pub fn close_spotlight(app: AppHandle, restore_focus: Option<bool>, session: Option<u64>) {
+    if let Some(s) = session {
+        let cur = SPOTLIGHT_SESSION.load(Ordering::SeqCst);
+        if s != cur {
+            eprintln!("[Bloom:Spotlight] close_spotlight ignored stale session: token={s} current={cur}");
+            return;
+        }
+    }
+    // Re-entrancy / Idempotency guard: only proceed if SPOTLIGHT_ACTIVE was true
+    if !crate::services::SPOTLIGHT_ACTIVE.swap(false, Ordering::SeqCst) {
+        return;
+    }
+    let should_restore = restore_focus.unwrap_or(true);
+    let _ = app.emit_to("overlay", "spotlight-close", ());
+
+    let overlay_win = app.get_webview_window("overlay");
+    let overlay_hwnd = overlay_win.as_ref().and_then(|w| w.hwnd().ok());
+
+    let had_focus = overlay_hwnd.map_or(false, |h| unsafe {
+        windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow() == h
+    });
+
+    let prev = crate::services::CURRENT_ACTIVE_HWND.swap(0, Ordering::SeqCst);
+    eprintln!("[Bloom:Spotlight] close_spotlight session={session:?} should_restore={should_restore} had_focus={had_focus} prev={prev:#x}");
+
+    // 1. Restore previous window BEFORE hiding overlay so Bloom is STILL the foreground window
+    if should_restore && prev != 0 {
+        crate::utils::restore_previous_window(
+            windows::Win32::Foundation::HWND(prev as *mut _),
+            had_focus,
+        );
+    }
+
+    // 2. Hide overlay after foreground has been restored and restore passive mode
+    if let Some(win) = overlay_win {
         let _ = win.set_ignore_cursor_events(true);
         let _ = win.hide();
         if let Ok(hwnd) = win.hwnd() {
-            crate::utils::re_assert_topmost(hwnd);
+            crate::utils::set_overlay_passive(hwnd);
         }
     }
+}
+
+#[tauri::command]
+pub async fn spotlight_launch_app(app: AppHandle, app_name: String) -> Result<(), String> {
+    if app_name == "start" {
+        let app_clone = app.clone();
+        let _ = app.run_on_main_thread(move || close_spotlight(app_clone, Some(false), None));
+        return Ok(());
+    }
+    if is_bloom_launch_target(&app_name, &app.config().identifier) {
+        open_settings_window(app.clone());
+        let app_clone = app.clone();
+        let _ = app.run_on_main_thread(move || close_spotlight(app_clone, Some(false), None));
+        return Ok(());
+    }
+
+    unsafe {
+        use windows::Win32::UI::WindowsAndMessaging::{AllowSetForegroundWindow, ASFW_ANY};
+        let _ = AllowSetForegroundWindow(ASFW_ANY);
+    }
+
+    let target = app_name.clone();
+    let mut launch_task = tauri::async_runtime::spawn_blocking(move || launch_path(&target));
+    let launch_res = tokio::time::timeout(tokio::time::Duration::from_millis(500), &mut launch_task).await;
+
+    let app_clone = app.clone();
+    let _ = app.run_on_main_thread(move || close_spotlight(app_clone, Some(false), None));
+
+    match launch_res {
+        Ok(join_res) => match join_res {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(inner_err)) => {
+                eprintln!("[Bloom] Launch failed: {inner_err}");
+                use tauri_plugin_dialog::DialogExt;
+                app.dialog()
+                    .message(format!("No se pudo abrir la aplicación:\n{}", inner_err))
+                    .title("Bloom Spotlight")
+                    .kind(tauri_plugin_dialog::MessageDialogKind::Error)
+                    .show(|_| {});
+                Err(inner_err)
+            }
+            Err(e) => Err(format!("Task execution error: {e}")),
+        },
+        Err(_) => {
+            eprintln!("[Bloom] launch_path took >500ms; closed Spotlight overlay (launch continues in background).");
+            let app_err = app.clone();
+            tauri::async_runtime::spawn(async move {
+                if let Ok(Err(inner_err)) = launch_task.await {
+                    eprintln!("[Bloom] Delayed launch failed: {inner_err}");
+                    use tauri_plugin_dialog::DialogExt;
+                    app_err.dialog()
+                        .message(format!("No se pudo abrir la aplicación:\n{}", inner_err))
+                        .title("Bloom Spotlight")
+                        .kind(tauri_plugin_dialog::MessageDialogKind::Error)
+                        .show(|_| {});
+                }
+            });
+            Ok(())
+        }
+    }
+}
+
+#[tauri::command]
+pub async fn spotlight_launch_command(app: AppHandle, action: String) -> Result<(), String> {
+    unsafe {
+        use windows::Win32::UI::WindowsAndMessaging::{AllowSetForegroundWindow, ASFW_ANY};
+        let _ = AllowSetForegroundWindow(ASFW_ANY);
+    }
+    let res = execute_system_command(app.clone(), action).await;
+    let app_clone = app.clone();
+    let _ = app.run_on_main_thread(move || close_spotlight(app_clone, Some(false), None));
+    res
+}
+
+#[tauri::command]
+pub async fn spotlight_launch_url(app: AppHandle, url: String) -> Result<(), String> {
+    let trimmed = url.trim();
+    if !trimmed.starts_with("http://") && !trimmed.starts_with("https://") {
+        return Err("Invalid URL: must start with http:// or https://".to_string());
+    }
+    unsafe {
+        use windows::Win32::UI::WindowsAndMessaging::{AllowSetForegroundWindow, ASFW_ANY};
+        let _ = AllowSetForegroundWindow(ASFW_ANY);
+    }
+    let res = tauri_plugin_opener::open_url(trimmed, None::<&str>).map_err(|e| e.to_string());
+    let app_clone = app.clone();
+    let _ = app.run_on_main_thread(move || close_spotlight(app_clone, Some(false), None));
+    res
 }
 
 #[tauri::command]
@@ -5367,7 +5714,97 @@ pub fn close_expose(app: AppHandle) {
 }
 
 #[tauri::command]
-pub fn execute_system_command(action: String) -> Result<(), String> {
+pub fn get_username() -> String {
+    std::env::var("USERNAME").unwrap_or_else(|_| "User".to_string())
+}
+
+#[tauri::command]
+pub fn get_system_uptime() -> u64 {
+    unsafe { windows::Win32::System::SystemInformation::GetTickCount64() / 1000 }
+}
+
+#[tauri::command]
+pub fn verify_windows_password(password: String) -> bool {
+    use windows::Win32::Security::{
+        LogonUserW, LOGON32_LOGON_INTERACTIVE, LOGON32_PROVIDER_DEFAULT,
+    };
+    use windows::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows::core::HSTRING;
+
+    let username = std::env::var("USERNAME").unwrap_or_default();
+    let mut token = HANDLE::default();
+    unsafe {
+        let res = LogonUserW(
+            &HSTRING::from(&username),
+            &HSTRING::from("."),
+            &HSTRING::from(&password),
+            LOGON32_LOGON_INTERACTIVE,
+            LOGON32_PROVIDER_DEFAULT,
+            &mut token,
+        );
+        if res.is_ok() && !token.is_invalid() {
+            let _ = CloseHandle(token);
+            return true;
+        }
+
+        let res2 = LogonUserW(
+            &HSTRING::from(&username),
+            windows::core::PCWSTR::null(),
+            &HSTRING::from(&password),
+            LOGON32_LOGON_INTERACTIVE,
+            LOGON32_PROVIDER_DEFAULT,
+            &mut token,
+        );
+        if res2.is_ok() && !token.is_invalid() {
+            let _ = CloseHandle(token);
+            return true;
+        }
+    }
+    false
+}
+
+#[tauri::command]
+pub fn lock_windows_workstation() {
+    unsafe {
+        type FnLockWorkStation = unsafe extern "system" fn() -> windows::core::BOOL;
+        if let Ok(user32) = windows::Win32::System::LibraryLoader::LoadLibraryA(windows::core::s!("user32.dll")) {
+            if let Some(f) = windows::Win32::System::LibraryLoader::GetProcAddress(user32, windows::core::s!("LockWorkStation")) {
+                let lock_fn: FnLockWorkStation = std::mem::transmute(f);
+                let _ = lock_fn();
+            }
+        }
+    }
+}
+
+#[tauri::command]
+pub async fn open_lockscreen(_app: tauri::AppHandle) -> Result<(), String> {
+    // Lockscreen disabled per user request
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn close_lockscreen(app: tauri::AppHandle) -> Result<(), String> {
+    crate::services::LOCKSCREEN_ACTIVE.store(false, std::sync::atomic::Ordering::Relaxed);
+    let _ = app.emit_to("overlay", "lockscreen-toggle", false);
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn toggle_lockscreen(_app: tauri::AppHandle) -> Result<(), String> {
+    // Lockscreen disabled per user request
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn execute_system_command(_app: tauri::AppHandle, action: String) -> Result<(), String> {
+    if action == "lock" {
+        lock_windows_workstation();
+        return Ok(());
+    }
+    unsafe {
+        use windows::Win32::UI::WindowsAndMessaging::{AllowSetForegroundWindow, ASFW_ANY};
+        let _ = AllowSetForegroundWindow(ASFW_ANY);
+    }
     unsafe {
         use windows::Win32::UI::Shell::ShellExecuteA;
         use windows::Win32::UI::WindowsAndMessaging::{SW_HIDE, SW_SHOWNORMAL};

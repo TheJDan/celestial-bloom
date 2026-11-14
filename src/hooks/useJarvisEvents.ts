@@ -120,13 +120,32 @@ export function useJarvisEvents() {
             }
           } else if (msg.type === "approval_result") {
             setApproval(null);
+          } else if (msg.type === "init") {
+            const st = (msg.state || "").toLowerCase();
+            if (st === "listening") {
+              setState("listening");
+              setLabel("Escuchando...");
+            } else if (st === "thinking") {
+              setState("thinking");
+              setLabel("Pensando...");
+            } else if (st === "speaking") {
+              setState("speaking");
+              setLabel("Hablando...");
+            } else if (st === "action_started") {
+              setState("action_started");
+              setLabel("Ejecutando...");
+            } else {
+              setState("idle");
+              setLabel("");
+            }
           } else if (msg.type === "state") {
             const st = (msg.value || "").toLowerCase();
             setState(st);
             if (st === "listening") setLabel("Escuchando...");
-            if (st === "thinking") setLabel("Pensando...");
-            if (st === "action_started") setLabel("Ejecutando...");
-            if (st === "idle") {
+            else if (st === "thinking") setLabel("Pensando...");
+            else if (st === "speaking") setLabel("Hablando...");
+            else if (st === "action_started") setLabel("Ejecutando...");
+            else if (st === "idle" || st === "sleeping") {
               setLabel("");
               setApproval(null);
             }

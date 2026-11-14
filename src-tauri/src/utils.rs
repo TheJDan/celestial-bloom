@@ -1473,6 +1473,14 @@ fn click_through_style(style: u32, ignore: bool) -> u32 {
 /// This helper uses the raw Win32 call with the correct flags and re-stamps
 /// `WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW` to prevent both problems.
 pub fn re_assert_topmost(hwnd: HWND) {
+    // If Spotlight is active and this window is the overlay, do not strip interactivity
+    // or re-stamp WS_EX_NOACTIVATE (even while activate_and_focus_window is in-flight).
+    // Dock and other windows continue to have topmost asserted normally.
+    if crate::services::SPOTLIGHT_ACTIVE.load(std::sync::atomic::Ordering::SeqCst)
+        && hwnd.0 as isize == crate::services::OVERLAY_HWND.load(std::sync::atomic::Ordering::SeqCst)
+    {
+        return;
+    }
     unsafe {
         use windows::Win32::UI::WindowsAndMessaging::{
             GetWindowLongPtrW, SetWindowLongPtrW, SetWindowPos, GWL_EXSTYLE, HWND_TOPMOST,
@@ -1487,25 +1495,80 @@ pub fn re_assert_topmost(hwnd: HWND) {
             0,
             0,
             0,
-            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOSENDCHANGING,
+            SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE | SWP_NOSENDCHANGING,
         );
         // Re-stamp NOACTIVATE + TOOLWINDOW — HWND_TOPMOST can cause these to be reset
         // by the shell on some Windows builds
         let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as usize;
         let new_ex = ex | WS_EX_NOACTIVATE.0 as usize | WS_EX_TOOLWINDOW.0 as usize;
-        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, new_ex as isize);
+        if ex != new_ex {
+            SetWindowLongPtrW(hwnd, GWL_EXSTYLE, new_ex as isize);
+        }
+    }
+}
+
+/// Configures and shows the overlay window for interactive keyboard focus (Spotlight):
+/// removes WS_EX_NOACTIVATE, ensures WS_EX_TOOLWINDOW, and brings the window to the top.
+pub fn set_overlay_interactive(hwnd: HWND) {
+    unsafe {
+        use windows::Win32::UI::WindowsAndMessaging::{
+            GetWindowLongPtrW, SetWindowLongPtrW, SetWindowPos, GWL_EXSTYLE, HWND_TOPMOST,
+            SWP_FRAMECHANGED, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+        };
+        let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as usize;
+        let active_ex = (ex & !(WS_EX_NOACTIVATE.0 as usize)) | WS_EX_TOOLWINDOW.0 as usize;
+        if ex != active_ex {
+            let _ = SetWindowLongPtrW(hwnd, GWL_EXSTYLE, active_ex as isize);
+        }
+        let _ = SetWindowPos(
+            hwnd,
+            Some(HWND_TOPMOST),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW | SWP_FRAMECHANGED,
+        );
+    }
+}
+
+/// Configures the overlay window for passive rendering (HUDs / Volume / Brightness):
+/// adds WS_EX_NOACTIVATE and keeps WS_EX_TOOLWINDOW without stealing keyboard focus.
+/// Idempotent: if styles are already correct, skips SetWindowPos/SWP_FRAMECHANGED.
+/// Pure style function: callers (e.g. edge hover) ensure Spotlight is not active before calling.
+pub fn set_overlay_passive(hwnd: HWND) {
+    unsafe {
+        use windows::Win32::UI::WindowsAndMessaging::{
+            GetWindowLongPtrW, SetWindowLongPtrW, SetWindowPos, GWL_EXSTYLE,
+            SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
+            WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+        };
+        let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as usize;
+        let needed_mask = (WS_EX_NOACTIVATE.0 | WS_EX_TOOLWINDOW.0) as usize;
+        if (ex & needed_mask) == needed_mask {
+            return; // Already configured as passive tool window; avoid frame recalc
+        }
+        let passive_ex = ex | needed_mask;
+        let _ = SetWindowLongPtrW(hwnd, GWL_EXSTYLE, passive_ex as isize);
+        let _ = SetWindowPos(
+            hwnd,
+            None,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED,
+        );
     }
 }
 
 /// Temporarily activates the overlay window and brings it to the foreground so that
 /// inputs (like Spotlight) can receive keyboard focus and text typing.
-pub fn activate_and_focus_window(hwnd: HWND) {
+/// Returns true if foreground focus was successfully verified; false otherwise.
+pub fn activate_and_focus_window(hwnd: HWND) -> bool {
     unsafe {
         use windows::Win32::UI::WindowsAndMessaging::{
-            GetWindowLongPtrW, SetWindowLongPtrW, SetWindowPos, SetForegroundWindow,
-            BringWindowToTop, GetForegroundWindow, GetWindowThreadProcessId,
-            GWL_EXSTYLE, HWND_TOPMOST, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW,
-            WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+            BringWindowToTop, GetForegroundWindow, GetWindowThreadProcessId, SetForegroundWindow,
         };
         use windows::Win32::UI::Input::KeyboardAndMouse::SetFocus;
         use windows::Win32::System::Threading::GetCurrentThreadId;
@@ -1514,40 +1577,81 @@ pub fn activate_and_focus_window(hwnd: HWND) {
             fn AttachThreadInput(id_attach: u32, id_attach_to: u32, f_attach: i32) -> i32;
         }
 
-        // 1. Remove WS_EX_NOACTIVATE from the extended styles
-        let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as usize;
-        let active_ex = (ex & !(WS_EX_NOACTIVATE.0 as usize)) | WS_EX_TOOLWINDOW.0 as usize;
-        let _ = SetWindowLongPtrW(hwnd, GWL_EXSTYLE, active_ex as isize);
+        // Configure styles for interactive foreground input
+        set_overlay_interactive(hwnd);
 
-        // 2. Attach thread input to bypass Windows foreground lock restrictions
-        let fg = GetForegroundWindow();
         let cur_thread = GetCurrentThreadId();
-        let fg_thread = if !fg.0.is_null() {
-            GetWindowThreadProcessId(fg, None)
-        } else {
-            0
-        };
-
-        if fg_thread != 0 && fg_thread != cur_thread {
-            AttachThreadInput(cur_thread, fg_thread, 1);
-        }
-
-        let _ = SetWindowPos(
-            hwnd,
-            Some(HWND_TOPMOST),
-            0,
-            0,
-            0,
-            0,
-            SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW,
-        );
         let _ = BringWindowToTop(hwnd);
+
+        // Immediate first attempt without sleeping
         let _ = SetForegroundWindow(hwnd);
         let _ = SetFocus(Some(hwnd));
-
-        if fg_thread != 0 && fg_thread != cur_thread {
-            AttachThreadInput(cur_thread, fg_thread, 0);
+        let fg = GetForegroundWindow();
+        if fg == hwnd {
+            eprintln!("[Bloom:Spotlight] activate_and_focus_window target={:?} immediate_fg={:?} success=true", hwnd.0, fg.0);
+            return true;
         }
+
+        // Retry loop only if initial attempt didn't grab focus immediately (max 3 retries, ~45ms)
+        for _ in 0..3 {
+            let fg = GetForegroundWindow();
+            if fg == hwnd {
+                let _ = SetFocus(Some(hwnd));
+                eprintln!("[Bloom:Spotlight] activate_and_focus_window target={:?} retry_fg={:?} success=true", hwnd.0, fg.0);
+                return true;
+            }
+
+            let fg_thread = if !fg.0.is_null() {
+                GetWindowThreadProcessId(fg, None)
+            } else {
+                0
+            };
+
+            if fg_thread != 0 && fg_thread != cur_thread {
+                let _ = AttachThreadInput(cur_thread, fg_thread, 1);
+            }
+
+            let _ = SetForegroundWindow(hwnd);
+            let _ = SetFocus(Some(hwnd));
+
+            if fg_thread != 0 && fg_thread != cur_thread {
+                let _ = AttachThreadInput(cur_thread, fg_thread, 0);
+            }
+
+            let fg_check = GetForegroundWindow();
+            if fg_check == hwnd {
+                eprintln!("[Bloom:Spotlight] activate_and_focus_window target={:?} retry_fg={:?} success=true", hwnd.0, fg_check.0);
+                return true;
+            }
+
+            std::thread::sleep(std::time::Duration::from_millis(15));
+        }
+
+        let fg = GetForegroundWindow();
+        let success = fg == hwnd;
+        eprintln!("[Bloom:Spotlight] activate_and_focus_window target={:?} final_fg={:?} success={success}", hwnd.0, fg.0);
+        success
+    }
+}
+
+/// Restores foreground focus to the window that had focus before Spotlight opened.
+/// Only activates if the overlay currently had focus (so a user-initiated blur to another
+/// window is NOT stolen back). Never alters the target window's styles or z-order!
+pub fn restore_previous_window(prev: HWND, overlay_had_focus: bool) {
+    unsafe {
+        use windows::Win32::UI::WindowsAndMessaging::{
+            IsWindow, IsIconic, ShowWindow, SetForegroundWindow, SW_RESTORE, GetForegroundWindow,
+        };
+        if !overlay_had_focus || prev.0.is_null() || !IsWindow(Some(prev)).as_bool() {
+            eprintln!("[Bloom:Spotlight] restore_previous_window skipped: had_focus={overlay_had_focus} prev={:?}", prev.0);
+            return;
+        }
+        if IsIconic(prev).as_bool() {
+            let _ = ShowWindow(prev, SW_RESTORE);
+        }
+        let res = SetForegroundWindow(prev).as_bool();
+        let new_fg = GetForegroundWindow();
+        eprintln!("[Bloom:Spotlight] restore_previous_window target={:?} SetForegroundWindow={res} new_fg={:?}", prev.0, new_fg.0);
     }
 }
 

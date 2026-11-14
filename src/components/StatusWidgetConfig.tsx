@@ -57,7 +57,7 @@ const WIDGET_DEFS: WidgetDef[] = [
 
 const DEFAULT_CONFIG: WidgetConfig = {
 	left: ["weather"],
-	right: ["battery"]
+	right: ["ram", "battery"]
 };
 
 const MAX_PER_ZONE = 2;

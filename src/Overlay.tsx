@@ -16,7 +16,11 @@ import { AltTab3D } from "./components/AltTab3D";
 import { QuickLookModal } from "./components/QuickLookModal";
 import { SpotlightLauncher } from "./components/SpotlightLauncher";
 import { ExposeGrid } from "./components/ExposeGrid";
+import { CaelestiaLockscreen } from "./components/CaelestiaLockscreen";
+import { initCaelestiaBridge } from "./caelestiaBridge";
 import { createRegionSender, measureElements, type RegionRect } from "./windowRegion";
+
+initCaelestiaBridge();
 
 // ─── App Volume Mixer ───────────────────────────────────────────────────────
 
@@ -611,6 +615,7 @@ function OverlayApp() {
 	const [quickLookOpen, setQuickLookOpen] = useState(false);
 	const [spotlightOpen, setSpotlightOpen] = useState(false);
 	const [exposeOpen, setExposeOpen] = useState(false);
+	const [lockscreenOpen, setLockscreenOpen] = useState(false);
 
 	// Volume state
 	const [volume, setVolume] = useState(0.5);
@@ -717,8 +722,11 @@ function OverlayApp() {
 			if (e.key === "Escape") {
 				setMode("idle");
 				setSpotlightOpen(false);
+				invoke("close_spotlight").catch(() => {});
 				setExposeOpen(false);
 				setQuickLookOpen(false);
+				setLockscreenOpen(false);
+				invoke("close_lockscreen").catch(() => {});
 				invoke("cancel_alt_tab").catch(() => {});
 				invoke("set_splash_fullscreen", { fullscreen: false }).catch(() => {});
 			}
@@ -801,6 +809,12 @@ function OverlayApp() {
 			else setExposeOpen((prev) => !prev);
 		});
 		const expClosePromise = listen("expose-close", () => setExposeOpen(false));
+		const clsTogglePromise = listen<boolean | undefined>("lockscreen-toggle", (e) => {
+			if (typeof e.payload === "boolean") setLockscreenOpen(e.payload);
+			else setLockscreenOpen((prev) => !prev);
+		});
+		const clsClosePromise = listen("lockscreen-close", () => setLockscreenOpen(false));
+		const clsOpenPromise = listen("lockscreen-open", () => setLockscreenOpen(true));
 
 		return () => {
 			volPromise.then((fn) => fn());
@@ -818,6 +832,9 @@ function OverlayApp() {
 			spotClosePromise.then((fn) => fn());
 			expTogglePromise.then((fn) => fn());
 			expClosePromise.then((fn) => fn());
+			clsTogglePromise.then((fn) => fn());
+			clsClosePromise.then((fn) => fn());
+			clsOpenPromise.then((fn) => fn());
 			window.removeEventListener("keydown", handleEscape);
 			document.removeEventListener("contextmenu", preventContext);
 		};
@@ -858,7 +875,7 @@ function OverlayApp() {
 					hideWindowTimeoutRef.current = null;
 				}
 
-				const anyModalOpen = altTabOpen || quickLookOpen || spotlightOpen || exposeOpen;
+				const anyModalOpen = altTabOpen || quickLookOpen || spotlightOpen || exposeOpen || lockscreenOpen;
 				if (mode === "idle" && !anyModalOpen) {
 					// Immediately pass through cursor and clicks to the active application
 					await appWindow.setIgnoreCursorEvents(true).catch(() => {});
@@ -887,7 +904,7 @@ function OverlayApp() {
 		return () => {
 			if (hideWindowTimeoutRef.current) clearTimeout(hideWindowTimeoutRef.current);
 		};
-	}, [mode, altTabOpen, quickLookOpen, spotlightOpen, exposeOpen]);
+	}, [mode, altTabOpen, quickLookOpen, spotlightOpen, exposeOpen, lockscreenOpen]);
 
 	// ── Volume Controls ──
 	const sendVolume = useTrailingThrottle((newVol: number) => {
@@ -970,10 +987,19 @@ function OverlayApp() {
 	useEffect(() => {
 		const width = window.innerWidth;
 		const height = window.innerHeight;
-		if (mode === "splash" || mode === "updating") {
+		const anyModalOpen =
+			altTabOpen || quickLookOpen || spotlightOpen || exposeOpen || lockscreenOpen;
+
+		if (mode === "splash" || mode === "updating" || anyModalOpen) {
 			sendOverlayRegion([{ x: 0, y: 0, width, height }]);
 			return;
 		}
+
+		if (mode === "idle") {
+			sendOverlayRegion([]);
+			return;
+		}
+
 		const pad = 24 * scale;
 		const cardWidth = HUD_CARD_WIDTH * scale;
 		const cardHeight = HUD_CARD_HEIGHT * scale;
@@ -985,15 +1011,22 @@ function OverlayApp() {
 			width: w,
 			height: cardHeight + pad * 2
 		});
-		sendOverlayRegion([
-			zone(0, leftWidth + pad),
-			zone(width - cardWidth - pad, cardWidth + pad),
-			...measureElements([
-				[".volume-notch-wrapper", 24],
-				[".volume-mixer-panel", 24],
-				[".brightness-notch-wrapper", 24]
-			])
-		]);
+
+		const rects: RegionRect[] = [];
+		if (mode === "volume") {
+			rects.push(zone(0, leftWidth + pad));
+			rects.push(
+				...measureElements([
+					[".volume-notch-wrapper", 24],
+					[".volume-mixer-panel", 24]
+				])
+			);
+		} else if (mode === "brightness") {
+			rects.push(zone(width - cardWidth - pad, cardWidth + pad));
+			rects.push(...measureElements([[".brightness-notch-wrapper", 24]]));
+		}
+
+		sendOverlayRegion(rects);
 	});
 
 	return (
@@ -1103,6 +1136,9 @@ function OverlayApp() {
 
 			{/* Exposé / Mission Control Grid */}
 			<ExposeGrid onOpenChange={setExposeOpen} />
+
+			{/* Caelestia Lockscreen Overlay */}
+			<CaelestiaLockscreen onOpenChange={setLockscreenOpen} />
 		</div>
 	);
 }

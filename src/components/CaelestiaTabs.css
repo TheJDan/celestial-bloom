@@ -1,0 +1,776 @@
+/* ─── Caelestia Shell Tabs: Dashboard, Media, Performance, Weather ─── */
+
+.caelestia-tabs-nav {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	gap: 6px;
+	padding: 10px 16px 8px 16px;
+	width: 100%;
+	border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+	user-select: none;
+	-webkit-user-select: none;
+}
+
+.caelestia-tab {
+	display: flex;
+	align-items: center;
+	gap: 7px;
+	padding: 6px 14px;
+	border-radius: 12px;
+	font-size: 12.5px;
+	font-weight: 500;
+	color: rgba(255, 255, 255, 0.55);
+	background: transparent;
+	border: 1px solid transparent;
+	cursor: pointer;
+	transition: all 0.18s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.caelestia-tab:hover {
+	color: #ffffff;
+	background: rgba(255, 255, 255, 0.06);
+}
+
+.caelestia-tab.active {
+	color: #ffffff;
+	background: rgba(255, 255, 255, 0.12);
+	border: 1px solid rgba(255, 255, 255, 0.1);
+	box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
+}
+
+/* ── Container for Tab Views ── */
+.caelestia-tab-body {
+	width: 100%;
+	height: calc(100% - 46px);
+	padding: 12px 18px 16px 18px;
+	box-sizing: border-box;
+	display: flex;
+	overflow: hidden;
+}
+
+/* ══════════════════════════════════════════════════════════════
+   DASHBOARD TAB (Image 3)
+   ══════════════════════════════════════════════════════════════ */
+.cdash-grid {
+	display: grid;
+	grid-template-columns: 140px 1fr 180px;
+	gap: 12px;
+	width: 100%;
+	height: 100%;
+}
+
+.cdash-card {
+	background: rgba(24, 25, 32, 0.75);
+	border: 1px solid rgba(255, 255, 255, 0.06);
+	border-radius: 18px;
+	padding: 12px;
+	box-sizing: border-box;
+	position: relative;
+	overflow: hidden;
+	display: flex;
+	flex-direction: column;
+}
+
+/* Left Column: Weather + Vertical Clock */
+.cdash-col-left {
+	display: flex;
+	flex-direction: column;
+	gap: 10px;
+}
+
+.cdash-weather-card {
+	flex: 1;
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	justify-content: center;
+	text-align: center;
+	gap: 4px;
+}
+
+.cdash-weather-icon {
+	color: #f9d71c;
+	filter: drop-shadow(0 0 10px rgba(249, 215, 28, 0.45));
+}
+
+.cdash-weather-temp {
+	font-size: 22px;
+	font-weight: 700;
+	color: #ffffff;
+	line-height: 1.1;
+}
+
+.cdash-weather-cond {
+	font-size: 11px;
+	color: rgba(255, 255, 255, 0.6);
+	text-transform: capitalize;
+}
+
+.cdash-clock-card {
+	height: 95px;
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	justify-content: center;
+	background: rgba(20, 21, 28, 0.85);
+}
+
+.cdash-clock-digit {
+	font-size: 28px;
+	font-weight: 800;
+	color: #f1f5f9;
+	line-height: 0.95;
+	font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+	letter-spacing: -1px;
+}
+
+.cdash-clock-dots {
+	font-size: 14px;
+	color: rgba(255, 255, 255, 0.4);
+	margin: 2px 0;
+	letter-spacing: 2px;
+}
+
+/* Center Column: Profile + Calendar */
+.cdash-col-center {
+	display: flex;
+	flex-direction: column;
+	gap: 10px;
+}
+
+.cdash-profile-bar {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	padding: 8px 12px;
+	background: rgba(24, 25, 32, 0.75);
+	border: 1px solid rgba(255, 255, 255, 0.06);
+	border-radius: 16px;
+}
+
+.cdash-avatar-wrap {
+	width: 32px;
+	height: 32px;
+	border-radius: 50%;
+	overflow: hidden;
+	border: 1.5px solid rgba(255, 255, 255, 0.2);
+	background: #111;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+}
+
+.cdash-avatar-img {
+	width: 100%;
+	height: 100%;
+	object-fit: cover;
+}
+
+.cdash-badge-pill {
+	display: inline-flex;
+	align-items: center;
+	gap: 5px;
+	padding: 3px 8px;
+	border-radius: 10px;
+	background: rgba(255, 255, 255, 0.08);
+	font-size: 11px;
+	color: #f1f5f9;
+}
+
+.cdash-uptime-pill {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+	font-size: 11px;
+	color: rgba(255, 255, 255, 0.6);
+	margin-left: auto;
+}
+
+.cdash-calendar-card {
+	flex: 1;
+	padding: 8px 12px;
+}
+
+.cdash-cal-header {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	font-size: 12px;
+	font-weight: 600;
+	color: #ffffff;
+	margin-bottom: 6px;
+}
+
+.cdash-cal-grid {
+	display: grid;
+	grid-template-columns: repeat(7, 1fr);
+	gap: 4px;
+	text-align: center;
+}
+
+.cdash-cal-day-label {
+	font-size: 10px;
+	font-weight: 600;
+	color: rgba(255, 255, 255, 0.4);
+	padding-bottom: 2px;
+}
+
+.cdash-cal-cell {
+	font-size: 11px;
+	color: rgba(255, 255, 255, 0.7);
+	height: 20px;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	border-radius: 6px;
+}
+
+.cdash-cal-cell.today {
+	background: #ffffff;
+	color: #0f1015;
+	font-weight: 700;
+	box-shadow: 0 0 10px rgba(255, 255, 255, 0.5);
+}
+
+.cdash-cal-cell.other-month {
+	opacity: 0.25;
+}
+
+/* Right Column: Gauges + Mini Player + Bongo Cat */
+.cdash-col-right {
+	display: flex;
+	gap: 8px;
+}
+
+.cdash-dials-col {
+	display: flex;
+	flex-direction: column;
+	justify-content: space-between;
+	gap: 6px;
+}
+
+.cdash-dial-circle {
+	width: 44px;
+	height: 44px;
+	position: relative;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+}
+
+.cdash-dial-svg {
+	position: absolute;
+	inset: 0;
+	transform: rotate(-90deg);
+}
+
+.cdash-dial-icon {
+	position: relative;
+	z-index: 2;
+	color: #f1f5f9;
+}
+
+.cdash-mini-player-card {
+	flex: 1;
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	text-align: center;
+	padding: 10px 8px;
+	gap: 6px;
+}
+
+.cdash-mini-vinyl-wrap {
+	width: 58px;
+	height: 58px;
+	position: relative;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	border-radius: 50%;
+}
+
+.cdash-mini-vinyl {
+	width: 48px;
+	height: 48px;
+	border-radius: 50%;
+	overflow: hidden;
+	border: 1.5px solid rgba(255, 255, 255, 0.2);
+	box-shadow: 0 4px 14px rgba(0, 0, 0, 0.6);
+}
+
+.cdash-mini-vinyl.spinning {
+	animation: cdash-spin 7s linear infinite;
+}
+
+@keyframes cdash-spin {
+	from { transform: rotate(0deg); }
+	to { transform: rotate(360deg); }
+}
+
+.cdash-mini-title {
+	font-size: 11.5px;
+	font-weight: 600;
+	color: #ffffff;
+	max-width: 100px;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.cdash-mini-artist {
+	font-size: 10px;
+	color: rgba(255, 255, 255, 0.55);
+	max-width: 100px;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.cdash-mini-controls {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	margin-top: 2px;
+}
+
+.cdash-mini-btn {
+	background: none;
+	border: none;
+	color: rgba(255, 255, 255, 0.7);
+	cursor: pointer;
+	padding: 2px;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	transition: color 0.15s;
+}
+
+.cdash-mini-btn:hover {
+	color: #ffffff;
+}
+
+.cdash-mini-play-pill {
+	background: #ffffff;
+	color: #0f1015;
+	border: none;
+	border-radius: 12px;
+	padding: 3px 8px;
+	cursor: pointer;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+}
+
+.cdash-bongo-cat {
+	width: 48px;
+	height: 28px;
+	margin-top: auto;
+	align-self: center;
+	filter: drop-shadow(0 2px 6px rgba(0, 0, 0, 0.4));
+}
+
+/* ══════════════════════════════════════════════════════════════
+   PERFORMANCE TAB (Image 5)
+   ══════════════════════════════════════════════════════════════ */
+.cperf-container {
+	display: flex;
+	flex-direction: column;
+	gap: 12px;
+	width: 100%;
+	height: 100%;
+}
+
+.cperf-row-top {
+	display: grid;
+	grid-template-columns: 1fr 1fr;
+	gap: 12px;
+	flex: 1;
+}
+
+.cperf-card {
+	background: rgba(24, 25, 32, 0.75);
+	border: 1px solid rgba(255, 255, 255, 0.06);
+	border-radius: 18px;
+	padding: 12px 14px;
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+}
+
+.cperf-hw-meta {
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+	flex: 1;
+}
+
+.cperf-hw-header {
+	display: flex;
+	align-items: center;
+	gap: 7px;
+}
+
+.cperf-hw-title {
+	font-size: 13px;
+	font-weight: 700;
+	color: #ffffff;
+}
+
+.cperf-hw-name {
+	font-size: 11px;
+	color: rgba(255, 255, 255, 0.55);
+}
+
+.cperf-temp-row {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	margin-top: 4px;
+}
+
+.cperf-temp-text {
+	font-size: 11px;
+	font-weight: 600;
+	color: rgba(255, 255, 255, 0.85);
+	min-width: 32px;
+}
+
+.cperf-temp-bar {
+	flex: 1;
+	height: 5px;
+	background: rgba(255, 255, 255, 0.1);
+	border-radius: 3px;
+	overflow: hidden;
+}
+
+.cperf-temp-fill {
+	height: 100%;
+	background: linear-gradient(90deg, #89b4fa, #f38ba8);
+	border-radius: 3px;
+	transition: width 0.3s ease;
+}
+
+/* Flower / Clover shaped Usage Badge */
+.cperf-clover-badge {
+	width: 52px;
+	height: 52px;
+	background: rgba(255, 255, 255, 0.08);
+	border-radius: 16px;
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	justify-content: center;
+	border: 1px solid rgba(255, 255, 255, 0.08);
+	box-shadow: inset 0 0 10px rgba(0, 0, 0, 0.3);
+}
+
+.cperf-clover-label {
+	font-size: 9px;
+	color: rgba(255, 255, 255, 0.5);
+	text-transform: uppercase;
+}
+
+.cperf-clover-pct {
+	font-size: 15px;
+	font-weight: 800;
+	color: #ffffff;
+}
+
+.cperf-row-bottom {
+	display: grid;
+	grid-template-columns: 140px 1fr 140px;
+	gap: 12px;
+	height: 110px;
+}
+
+.cperf-storage-card, .cperf-mem-card {
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	justify-content: center;
+	text-align: center;
+	gap: 3px;
+	padding: 10px;
+}
+
+.cperf-gauge-val {
+	font-size: 13px;
+	font-weight: 700;
+	color: #ffffff;
+}
+
+.cperf-gauge-sub {
+	font-size: 10px;
+	color: rgba(255, 255, 255, 0.55);
+}
+
+.cperf-drive-pill {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+	padding: 2px 7px;
+	border-radius: 8px;
+	background: rgba(255, 255, 255, 0.08);
+	font-size: 10px;
+	color: rgba(255, 255, 255, 0.7);
+	margin-top: 2px;
+}
+
+.cperf-net-card {
+	display: flex;
+	flex-direction: column;
+	padding: 8px 12px;
+}
+
+.cperf-net-header {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	font-size: 11px;
+	font-weight: 600;
+	color: rgba(255, 255, 255, 0.8);
+	margin-bottom: 4px;
+}
+
+.cperf-net-svg {
+	flex: 1;
+	width: 100%;
+	height: 38px;
+}
+
+.cperf-net-footer {
+	display: flex;
+	justify-content: space-between;
+	font-size: 10px;
+	color: rgba(255, 255, 255, 0.6);
+	margin-top: 4px;
+}
+
+
+/* ══════════════════════════════════════════════════════════════
+   MONOCHROME OVERRIDES (Performance Tab)
+   ══════════════════════════════════════════════════════════════ */
+.cperf-icon-mono {
+	color: #ffffff !important;
+}
+
+.cperf-icon-mono-sub {
+	color: rgba(255, 255, 255, 0.6) !important;
+}
+
+.cperf-temp-fill.mono {
+	background: #ffffff !important;
+	box-shadow: 0 0 8px rgba(255, 255, 255, 0.4);
+}
+
+.cperf-clover-badge.mono {
+	background: rgba(255, 255, 255, 0.08) !important;
+	border: 1px solid rgba(255, 255, 255, 0.15) !important;
+}
+
+.cperf-waveform-box {
+	width: 100%;
+	height: 40px;
+	margin-top: 4px;
+}
+
+/* ══════════════════════════════════════════════════════════════
+   WEATHER TAB
+   ══════════════════════════════════════════════════════════════ */
+.cweather-container {
+	display: grid;
+	grid-template-columns: 240px 1fr;
+	gap: 12px;
+	width: 100%;
+	height: 100%;
+}
+
+.cweather-hero-card {
+	background: rgba(24, 25, 32, 0.75);
+	border: 1px solid rgba(255, 255, 255, 0.08);
+	border-radius: 18px;
+	padding: 14px;
+	display: flex;
+	flex-direction: column;
+	justify-content: space-between;
+}
+
+.cweather-hero-header {
+	display: flex;
+	justify-content: space-between;
+	align-items: center;
+}
+
+.cweather-city-badge {
+	display: flex;
+	align-items: center;
+	gap: 5px;
+	font-size: 11px;
+	font-weight: 600;
+	color: rgba(255, 255, 255, 0.9);
+}
+
+.cweather-date-badge {
+	font-size: 10px;
+	color: rgba(255, 255, 255, 0.5);
+	text-transform: capitalize;
+}
+
+.cweather-hero-main {
+	display: flex;
+	align-items: center;
+	gap: 14px;
+	margin: 10px 0;
+}
+
+.cweather-sun-glow {
+	color: #ffffff;
+	filter: drop-shadow(0 0 10px rgba(255, 255, 255, 0.5));
+}
+
+.cweather-big-temp {
+	font-size: 38px;
+	font-weight: 800;
+	line-height: 1;
+	color: #ffffff;
+	display: block;
+}
+
+.cweather-cond-label {
+	font-size: 11px;
+	color: rgba(255, 255, 255, 0.65);
+	margin-top: 4px;
+	display: block;
+}
+
+.cweather-hero-stats {
+	display: flex;
+	flex-direction: column;
+	gap: 5px;
+}
+
+.cweather-stat-pill {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	font-size: 10px;
+	color: rgba(255, 255, 255, 0.7);
+	background: rgba(255, 255, 255, 0.04);
+	padding: 3px 8px;
+	border-radius: 6px;
+}
+
+.cweather-right-col {
+	display: flex;
+	flex-direction: column;
+	gap: 10px;
+	height: 100%;
+}
+
+.cweather-hourly-card,
+.cweather-daily-card {
+	background: rgba(24, 25, 32, 0.75);
+	border: 1px solid rgba(255, 255, 255, 0.08);
+	border-radius: 16px;
+	padding: 10px 12px;
+}
+
+.cweather-subheading {
+	font-size: 10px;
+	font-weight: 600;
+	text-transform: uppercase;
+	letter-spacing: 0.5px;
+	color: rgba(255, 255, 255, 0.45);
+	display: block;
+	margin-bottom: 6px;
+}
+
+.cweather-hourly-track {
+	display: flex;
+	gap: 8px;
+	overflow-x: auto;
+}
+
+.cweather-hour-item {
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	gap: 4px;
+	padding: 4px 6px;
+	background: rgba(255, 255, 255, 0.03);
+	border-radius: 10px;
+	min-width: 44px;
+}
+
+.cweather-hour-time {
+	font-size: 9px;
+	color: rgba(255, 255, 255, 0.5);
+}
+
+.cweather-hour-icon {
+	color: rgba(255, 255, 255, 0.85);
+}
+
+.cweather-hour-temp {
+	font-size: 11px;
+	font-weight: 700;
+	color: #ffffff;
+}
+
+.cweather-daily-list {
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+}
+
+.cweather-daily-row {
+	display: grid;
+	grid-template-columns: 36px 1fr 110px;
+	align-items: center;
+	font-size: 10px;
+}
+
+.cweather-daily-day {
+	font-weight: 600;
+	color: rgba(255, 255, 255, 0.85);
+}
+
+.cweather-daily-cond {
+	color: rgba(255, 255, 255, 0.5);
+	font-size: 9.5px;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.cweather-daily-range {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+}
+
+.cweather-range-low,
+.cweather-range-high {
+	font-size: 10px;
+	color: rgba(255, 255, 255, 0.7);
+	min-width: 20px;
+	text-align: right;
+}
+
+.cweather-range-bar {
+	flex: 1;
+	height: 3px;
+	background: rgba(255, 255, 255, 0.1);
+	border-radius: 2px;
+	position: relative;
+	overflow: hidden;
+}
+
+.cweather-range-fill {
+	position: absolute;
+	height: 100%;
+	background: #ffffff;
+	border-radius: 2px;
+}

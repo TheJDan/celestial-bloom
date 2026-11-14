@@ -4,6 +4,15 @@
 		<meta charset="UTF-8" />
 		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
 		<title>Bloom Dock</title>
+			<script src="/qwebchannel.js"></script>
+		<script>
+			if (typeof QWebChannel !== 'undefined' && window.qt) {
+				new QWebChannel(qt.webChannelTransport, function(channel) {
+					window.qtBridge = channel.objects.qtBridge;
+					console.log("[Bloom] Connected to QtBridge");
+				});
+			}
+		</script>
 	</head>
 	<body>
 		<div id="root"></div>

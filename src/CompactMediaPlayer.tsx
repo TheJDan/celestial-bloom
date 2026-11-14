@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { motion, AnimatePresence, useAnimation } from "framer-motion";
 import { invoke } from "@tauri-apps/api/core";
-import { Mic2, LoaderCircle } from "lucide-react";
+import { Mic2, LoaderCircle, Shuffle, Repeat, ChevronDown } from "lucide-react";
 import { Visualizer } from "./App";
 import { useLyrics } from "./hooks/useLyrics";
 import {
@@ -48,6 +48,7 @@ interface CompactMediaPlayerProps {
 	onAnimateNext: () => void;
 	onLayoutChange: (layout: "classic" | "compact") => void;
 	onAudioOutputClick?: () => void;
+	isCaelestia?: boolean;
 }
 
 const MARQUEE_SPEED = 30;
@@ -133,7 +134,8 @@ export function CompactMediaPlayer({
 	onAnimatePrev,
 	onAnimateNext,
 	onLayoutChange,
-	onAudioOutputClick
+	onAudioOutputClick,
+	isCaelestia = true
 }: CompactMediaPlayerProps) {
 	const seekRef = useRef<HTMLInputElement>(null);
 	const lyricsListRef = useRef<HTMLDivElement>(null);
@@ -225,6 +227,246 @@ export function CompactMediaPlayer({
 	}, [displayPosition]);
 
 	const progressPercent = durationMs > 0 ? (displayPosition / durationMs) * 100 : 0;
+
+	if (isCaelestia !== false) {
+		return (
+			<div className="caelestia-player-container" onClick={(e) => e.stopPropagation()}>
+				{/* Left Column: Art + Visualizer Ring + Track Details + Wave Seek + Controls */}
+				<div className="caelestia-player-left">
+					<div className="caelestia-art-wrap">
+						<svg className={`caelestia-vis-ring ${isPlaying ? "playing" : ""}`} viewBox="0 0 110 110">
+							{Array.from({ length: 32 }).map((_, i) => {
+								const angle = (i / 32) * 2 * Math.PI;
+								const cos = Math.cos(angle);
+								const sin = Math.sin(angle);
+								const r1 = 36;
+								const r2 = isPlaying ? 40 + ((i % 5) + 1) * 2.8 : 39;
+								return (
+									<line
+										key={i}
+										className={`caelestia-ring-bar bar-${i % 8}`}
+										x1={55 + r1 * cos}
+										y1={55 + r1 * sin}
+										x2={55 + r2 * cos}
+										y2={55 + r2 * sin}
+										stroke="var(--bloom-accent, #ff4d6d)"
+										strokeWidth="2.2"
+										strokeLinecap="round"
+									/>
+								);
+							})}
+						</svg>
+						<div className="caelestia-art-inner">
+							<AnimatePresence mode="wait" initial={false}>
+								{albumArtUrl ? (
+									<motion.img
+										key={`art-${albumArtKey}`}
+										src={albumArtUrl}
+										alt="Art"
+										draggable={false}
+										initial={{ rotateY: 90, opacity: 0 }}
+										animate={{ rotateY: 0, opacity: 1 }}
+										exit={{ rotateY: -90, opacity: 0 }}
+										transition={{ duration: 0.3, ease: "easeInOut" }}
+									/>
+								) : (
+									<motion.div
+										key="placeholder"
+										className="caelestia-art-placeholder"
+										initial={{ rotateY: 90, opacity: 0 }}
+										animate={{ rotateY: 0, opacity: 1 }}
+										exit={{ rotateY: -90, opacity: 0 }}
+										transition={{ duration: 0.3, ease: "easeInOut" }}
+									>
+										<MusicNoteIcon size={24} />
+									</motion.div>
+								)}
+							</AnimatePresence>
+						</div>
+					</div>
+
+					<div className="caelestia-track-details">
+						<TitleMarquee title={mediaInfo.has_media && mediaInfo.title ? mediaInfo.title : "Sin reproducción activa"} />
+						<span className="caelestia-artist">
+							{mediaInfo.has_media && mediaInfo.artist ? mediaInfo.artist : "Abre Spotify o un reproductor"}
+						</span>
+					</div>
+
+					{/* Wavy seek bar */}
+					<div className="caelestia-wavy-row">
+						<span className="caelestia-time">{formatTime(displayPosition)}</span>
+						<div className="caelestia-wave-container">
+							<svg className="caelestia-wave-svg" viewBox="0 0 140 16" preserveAspectRatio="none">
+								<path className="caelestia-wave-bg" d="M 0 8 Q 8 2, 16 8 T 32 8 T 48 8 T 64 8 T 80 8 T 96 8 T 112 8 T 128 8 T 140 8" />
+								<path
+									className="caelestia-wave-fill"
+									d="M 0 8 Q 8 2, 16 8 T 32 8 T 48 8 T 64 8 T 80 8 T 96 8 T 112 8 T 128 8 T 140 8"
+									style={{
+										strokeDasharray: 140,
+										strokeDashoffset: 140 - (140 * progressPercent) / 100
+									}}
+								/>
+							</svg>
+							{seekEnabled && (
+								<input
+									ref={seekRef}
+									type="range"
+									className="caelestia-seek-input"
+									min={0}
+									max={durationMs}
+									step={100}
+									value={displayPosition}
+									onMouseDown={handleSeekStart}
+									onTouchStart={handleSeekStart}
+									onChange={handleSeekChange}
+									onMouseUp={handleSeekEnd}
+									onTouchEnd={handleSeekEnd}
+									onClick={(e) => e.stopPropagation()}
+								/>
+							)}
+						</div>
+						<span className="caelestia-time">{formatRemaining(displayPosition, durationMs)}</span>
+					</div>
+
+					{/* Controls */}
+					<div className="caelestia-controls-row">
+						<motion.button
+							className="caelestia-ctrl-btn"
+							whileTap={{ scale: 0.9 }}
+							title="Aleatorio"
+						>
+							<Shuffle size={14} />
+						</motion.button>
+
+						<motion.button
+							className="caelestia-ctrl-btn"
+							onClick={(e) => {
+								e.stopPropagation();
+								onAnimatePrev();
+							}}
+							whileTap={{ scale: 0.9 }}
+							title="Anterior"
+						>
+							<SkipBackIcon size={18} />
+						</motion.button>
+
+						<motion.button
+							className="caelestia-play-pill"
+							onClick={(e) => {
+								e.stopPropagation();
+								onTogglePlayPause();
+							}}
+							whileTap={{ scale: 0.95 }}
+							title={isPlaying ? "Pausar" : "Reproducir"}
+						>
+							{isPlaying ? <PauseIcon size={20} /> : <PlayIcon size={20} />}
+						</motion.button>
+
+						<motion.button
+							className="caelestia-ctrl-btn"
+							onClick={(e) => {
+								e.stopPropagation();
+								onAnimateNext();
+							}}
+							whileTap={{ scale: 0.9 }}
+							title="Siguiente"
+						>
+							<SkipForwardIcon size={18} />
+						</motion.button>
+
+						<motion.button
+							className="caelestia-ctrl-btn"
+							whileTap={{ scale: 0.9 }}
+							title="Repetir"
+						>
+							<Repeat size={14} />
+						</motion.button>
+					</div>
+				</div>
+
+				{/* Right Column: Synced Lyrics */}
+				<div className="caelestia-player-right">
+					<div className="caelestia-lyrics-header">
+						<div className="caelestia-lyrics-title">
+							<Mic2 size={13} strokeWidth={2.2} />
+							<span>{isNonMusicVideo ? "Web Media" : "Lyrics"}</span>
+						</div>
+					</div>
+					<div ref={lyricsListRef} className="caelestia-lyrics-scroll" onWheel={(e) => e.stopPropagation()}>
+						{!mediaInfo.has_media || !mediaInfo.title ? (
+							<div className="caelestia-lyrics-state" style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", height: "100%", textAlign: "center", gap: 6, padding: "12px 14px" }}>
+								<span style={{ opacity: 0.45, color: "var(--bloom-accent, #ff4d6d)" }}>
+									<MusicNoteIcon size={22} />
+								</span>
+								<span style={{ fontSize: 12, fontWeight: 700, color: "rgba(255, 255, 255, 0.9)" }}>
+									Sin reproducción activa
+								</span>
+								<span style={{ fontSize: 10.5, color: "rgba(255, 255, 255, 0.55)", lineHeight: 1.45, maxWidth: 210 }}>
+									Inicia música en Spotify o tu navegador para ver la letra y controles aquí.
+								</span>
+							</div>
+						) : isNonMusicVideo ? (
+							<div className="caelestia-lyrics-state">
+								<span style={{ fontSize: 11, opacity: 0.8, lineHeight: 1.5 }}>
+									Modo multimedia web activo.<br />
+									Letras desactivadas para redes y videos.
+								</span>
+							</div>
+						) : isLyricsLoading ? (
+							<div className="caelestia-lyrics-state">
+								<LoaderCircle className="cmp-spin" size={16} />
+								<span>Buscando letra...</span>
+							</div>
+						) : lyrics.length > 0 ? (
+							lyrics.map((line, idx) => {
+								const isActive = idx === activeIndex;
+								return (
+									<div
+										key={`${line.timeMs}-${idx}`}
+										ref={isActive ? activeLyricRef : null}
+										className={`caelestia-lyric-line ${isActive ? "active" : ""}`}
+										onClick={(e) => {
+											e.stopPropagation();
+											invoke("media_seek", { positionMs: line.timeMs }).catch(() => {});
+										}}
+										title="Clic para saltar a este momento"
+									>
+										{line.text}
+									</div>
+								);
+							})
+						) : (
+							<div className="caelestia-lyrics-state">
+								<span>♪ Sin letra disponible para esta canción</span>
+							</div>
+						)}
+					</div>
+
+					{/* Bottom source badge e.g. [ Spotify v ] */}
+					<div className="caelestia-source-row">
+						<div
+							className="caelestia-source-pill"
+							onClick={(e) => {
+								e.stopPropagation();
+								if (onAudioOutputClick) onAudioOutputClick();
+							}}
+							title="Fuente de reproducción / Salida"
+						>
+							<MusicNoteIcon size={12} />
+							<span>
+								{mediaInfo.artist?.toLowerCase().includes("spotify")
+									? "Spotify"
+									: isNonMusicVideo
+										? "Browser"
+										: "Spotify"}
+							</span>
+							<ChevronDown size={11} />
+						</div>
+					</div>
+				</div>
+			</div>
+		);
+	}
 
 	return (
 		<div className="cmp">

@@ -2,6 +2,9 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import Dock from "./Dock";
 import "./Dock.css";
+import { initCaelestiaBridge } from "./caelestiaBridge";
+
+initCaelestiaBridge();
 
 document.addEventListener("contextmenu", (e) => e.preventDefault());
 

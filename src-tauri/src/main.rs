@@ -146,6 +146,8 @@ fn main() {
             open_notification_center,
             open_system_tray,
             set_ignore_cursor_events,
+            update_notch_hit_rects,
+            get_material_palette,
             set_window_height,
             resize_settings_window,
             hide_overlay,
@@ -252,8 +254,20 @@ fn main() {
             bluetooth::bluetooth_refresh_buds,
             get_quick_look_data,
             close_quick_look,
+            open_spotlight,
+            toggle_spotlight,
             close_spotlight,
+            spotlight_launch_app,
+            spotlight_launch_command,
+            spotlight_launch_url,
             close_expose,
+            get_username,
+            get_system_uptime,
+            verify_windows_password,
+            lock_windows_workstation,
+            open_lockscreen,
+            close_lockscreen,
+            toggle_lockscreen,
             execute_system_command,
             window_region::set_window_region,
             usb::usb_list_devices,
@@ -390,6 +404,9 @@ fn main() {
             // take effect on a window that has never been shown. Show it once
             // to register it with the compositor, then hide immediately.
             if let Some(ov_win) = app.get_webview_window("overlay") {
+                if let Ok(hwnd) = ov_win.hwnd() {
+                    crate::services::OVERLAY_HWND.store(hwnd.0 as isize, std::sync::atomic::Ordering::SeqCst);
+                }
                 // Layered from the start, like the notch and dock (see
                 // set_click_through): the overlay has a window region too.
                 let _ = ov_win.set_ignore_cursor_events(true);

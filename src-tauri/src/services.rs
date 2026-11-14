@@ -33,9 +33,14 @@ pub static ALT_KEY_HELD: AtomicBool = AtomicBool::new(false);
 pub static ALT_TAB_ACTIVE: AtomicBool = AtomicBool::new(false);
 pub static WIN_TAB_ACTIVE: AtomicBool = AtomicBool::new(false);
 pub static SPOTLIGHT_ACTIVE: AtomicBool = AtomicBool::new(false);
+pub static LOCKSCREEN_ACTIVE: AtomicBool = AtomicBool::new(false);
 pub static QUICK_LOOK_ACTIVE: AtomicBool = AtomicBool::new(false);
 pub static EXPOSE_ACTIVE: AtomicBool = AtomicBool::new(false);
 pub static CURRENT_ACTIVE_HWND: AtomicIsize = AtomicIsize::new(0);
+pub static OVERLAY_HWND: AtomicIsize = AtomicIsize::new(0);
+
+/// Magic dwExtraInfo flag for Bloom-injected keystrokes ('BLOO')
+const HOOK_MAGIC: usize = 0x424C4F4F;
 
 /// Virtual key Microsoft documents as "unassigned", used as the mask key.
 /// See `send_start_menu_mask`.
@@ -48,14 +53,26 @@ static KEYBOARD_HOOK: AtomicIsize = AtomicIsize::new(0);
 /// before Windows shell claims them. Runs on a dedicated thread with an independent
 /// message loop to guarantee it never blocks the UI or drops keystrokes.
 pub fn setup_keyboard_hook(app_handle: AppHandle) {
-    let _ = KEYBOARD_HOOK_APP_HANDLE.set(app_handle);
+    let _ = KEYBOARD_HOOK_APP_HANDLE.set(app_handle.clone());
+
     std::thread::Builder::new()
         .name("bloom-keyboard-hook".into())
         .spawn(move || unsafe {
+            use windows::Win32::UI::Input::KeyboardAndMouse::{
+                RegisterHotKey, UnregisterHotKey, MOD_ALT, MOD_NOREPEAT, VK_SPACE,
+            };
             use windows::Win32::UI::WindowsAndMessaging::{
                 DispatchMessageW, GetMessageW, KillTimer, SetTimer, SetWindowsHookExW,
-                TranslateMessage, UnhookWindowsHookEx, MSG, WH_KEYBOARD_LL, WM_TIMER,
+                TranslateMessage, UnhookWindowsHookEx, MSG, WH_KEYBOARD_LL, WM_HOTKEY, WM_TIMER,
             };
+
+            const SPOTLIGHT_HOTKEY_ID: i32 = 0x5071;
+            let reg_res = RegisterHotKey(None, SPOTLIGHT_HOTKEY_ID, MOD_ALT | MOD_NOREPEAT, VK_SPACE.0 as u32);
+            if let Err(e) = reg_res {
+                eprintln!("[Bloom] WARNING: RegisterHotKey(Alt+Space) failed: {e:?}. Another tool (PowerToys Run, Flow Launcher, Raycast, etc.) might already have registered Alt+Space!");
+            } else {
+                eprintln!("[Bloom] RegisterHotKey(Alt+Space) registered successfully.");
+            }
 
             let mut message = MSG::default();
             let timer = SetTimer(None, 2, 500, None);
@@ -65,7 +82,14 @@ pub fn setup_keyboard_hook(app_handle: AppHandle) {
             }
 
             while GetMessageW(&mut message, None, 0, 0).0 > 0 {
-                if message.message == WM_TIMER && message.wParam.0 == timer {
+                if message.message == WM_HOTKEY && message.wParam.0 as i32 == SPOTLIGHT_HOTKEY_ID {
+                    if let Some(app) = KEYBOARD_HOOK_APP_HANDLE.get() {
+                        let app_clone = app.clone();
+                        let _ = app.run_on_main_thread(move || {
+                            crate::commands::toggle_spotlight(app_clone);
+                        });
+                    }
+                } else if message.message == WM_TIMER && message.wParam.0 == timer {
                     if SHUTTING_DOWN.load(Ordering::Relaxed) {
                         break;
                     }
@@ -96,6 +120,7 @@ pub fn setup_keyboard_hook(app_handle: AppHandle) {
                 let _ = KillTimer(None, timer);
             }
             if let Some(h) = hook {
+                let _ = UnregisterHotKey(None, SPOTLIGHT_HOTKEY_ID);
                 let _ = UnhookWindowsHookEx(h);
                 KEYBOARD_HOOK.store(0, Ordering::Relaxed);
             }
@@ -113,8 +138,9 @@ fn win_number_index(vk: u16) -> Option<u8> {
 
 /// 3D Alt+Tab window switcher setting cache
 #[allow(dead_code)]
-pub static ALT_TAB_3D_ENABLED: AtomicBool = AtomicBool::new(false);
+pub static ALT_TAB_3D_ENABLED: AtomicBool = AtomicBool::new(true);
 pub static DOCK_WIN_NUMBER_ENABLED: AtomicBool = AtomicBool::new(true);
+pub static WIN_COMBO_USED: AtomicBool = AtomicBool::new(false);
 
 /// The dock's Win+Number replacement can be turned off in Settings > Dock.
 fn dock_win_number_enabled() -> bool {
@@ -135,7 +161,7 @@ pub fn alt_tab_3d_enabled() -> bool {
             }
         }
     }
-    false
+    true
 }
 
 /// Whether one of Bloom's HUD overlays is enabled (`bloom-volume-overlay-enabled`,
@@ -170,8 +196,11 @@ fn alt_key_physically_down() -> bool {
 
 /// Explorer opens the Start menu when it only sees a Win keydown and keyup.
 /// Swallowing a Win+Number combo would look exactly like that on Win release,
-/// so a tap of an unassigned key is injected first — the same trick as
-/// AutoHotkey's `#MenuMaskKey` — making the shell treat Win as a real modifier.
+/// Injects a synchronous neutral Ctrl modifier tap around the Win keyup to tell Windows
+/// that the Win key was part of a combo (Win+Ctrl), which aborts opening the native Windows Start Menu.
+/// This matches AutoHotkey's proven `#MenuMaskKey` implementation:
+/// 1. Press Ctrl down
+/// 2. Release LWIN / RWIN (so Windows OS clears the stuck Win key state)
 pub fn send_start_menu_mask() {
     use windows::Win32::UI::Input::KeyboardAndMouse::{
         SendInput, INPUT, INPUT_0, KEYBDINPUT, KEYEVENTF_KEYUP, VIRTUAL_KEY,
@@ -186,7 +215,7 @@ pub fn send_start_menu_mask() {
                     wScan: 0,
                     dwFlags: Default::default(),
                     time: 0,
-                    dwExtraInfo: 0,
+                    dwExtraInfo: HOOK_MAGIC,
                 },
             },
         },
@@ -198,7 +227,7 @@ pub fn send_start_menu_mask() {
                     wScan: 0,
                     dwFlags: KEYEVENTF_KEYUP,
                     time: 0,
-                    dwExtraInfo: 0,
+                    dwExtraInfo: HOOK_MAGIC,
                 },
             },
         },
@@ -223,6 +252,10 @@ pub fn release_win_key() {
 
 /// Explicitly releases all Alt and Win modifier states cleanly by injecting synthetic keyups.
 pub fn release_alt_key() {
+    if !alt_key_physically_down() && !ALT_KEY_HELD.load(Ordering::Relaxed) {
+        return;
+    }
+    ALT_KEY_HELD.store(false, Ordering::Relaxed);
     send_start_menu_mask();
     use windows::Win32::UI::Input::KeyboardAndMouse::{
         SendInput, INPUT, INPUT_0, KEYBDINPUT, KEYEVENTF_KEYUP, VK_LMENU, VK_MENU, VK_RMENU,
@@ -325,8 +358,15 @@ unsafe extern "system" fn keyboard_hook_proc(
         let is_down = wparam.0 == WM_KEYDOWN as usize || wparam.0 == WM_SYSKEYDOWN as usize;
         let is_up = wparam.0 == WM_KEYUP as usize || wparam.0 == WM_SYSKEYUP as usize;
 
-        // Only physical presses drive keyboard combos; injected events must not re-enter
-        if (kb.flags.0 & LLKHF_INJECTED.0) == 0 {
+        // Injected events and Bloom's own mask strokes must not re-enter or trigger combos
+        if kb.dwExtraInfo == HOOK_MAGIC || (kb.flags.0 & LLKHF_INJECTED.0) != 0 {
+            return windows::Win32::UI::WindowsAndMessaging::CallNextHookEx(None, code, wparam, lparam);
+        }
+
+        if is_down && vk_code != VK_LWIN && vk_code != VK_RWIN && (WIN_KEY_DOWN.load(Ordering::Relaxed) || win_key_physically_down()) {
+            WIN_COMBO_USED.store(true, Ordering::Relaxed);
+        }
+
             let is_alt = vk_code == VK_MENU || vk_code == VK_LMENU || vk_code == VK_RMENU;
             let alt_phys_down = alt_key_physically_down();
             let alt_context_down = (kb.flags.0 & 0x20) != 0;
@@ -373,6 +413,14 @@ unsafe extern "system" fn keyboard_hook_proc(
 
             let is_space = vk_code == VK_SPACE;
             let is_f3 = vk_code == VK_F3;
+            let _is_s_key = vk_code.0 == 0x53; // 'S' key for Win + S (Windows Search replacement)
+
+            let _shift_down = unsafe {
+                use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_SHIFT, VK_LSHIFT, VK_RSHIFT};
+                (GetAsyncKeyState(VK_SHIFT.0 as i32) as u16 & 0x8000) != 0
+                    || (GetAsyncKeyState(VK_LSHIFT.0 as i32) as u16 & 0x8000) != 0
+                    || (GetAsyncKeyState(VK_RSHIFT.0 as i32) as u16 & 0x8000) != 0
+            };
 
             let ctrl_phys_down = unsafe {
                 use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_CONTROL, VK_LCONTROL, VK_RCONTROL};
@@ -389,15 +437,34 @@ unsafe extern "system" fn keyboard_hook_proc(
                 use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_RMENU};
                 (GetAsyncKeyState(VK_RMENU.0 as i32) as u16 & 0x8000) != 0
             };
-            let alt_active = alt_down || alt_left_phys || alt_right_phys;
+            let alt_active = alt_down || alt_left_phys || alt_right_phys || alt_context_down;
 
-            // Intercept Alt + Space (Left Alt or Right Alt / AltGr) for Spotlight / Raycast Launcher
-            // Ctrl + Space is explicitly excluded to prevent desktop freezing and allow normal system shortcuts
-            if is_space && alt_active && !win_down {
+            // Spotlight / Search Launcher hotkeys disabled per user request until fully reviewed
+            let is_spotlight_hotkey = false;
+            if is_spotlight_hotkey {
                 if is_down {
-                    let active = !SPOTLIGHT_ACTIVE.load(Ordering::Relaxed);
-                    SPOTLIGHT_ACTIVE.store(active, Ordering::Relaxed);
+                    if let Some(app) = KEYBOARD_HOOK_APP_HANDLE.get() {
+                        crate::commands::toggle_spotlight(app.clone());
+                    }
+                    return windows::Win32::Foundation::LRESULT(1);
+                } else if is_up {
+                    return windows::Win32::Foundation::LRESULT(1);
+                }
+            }
+
+            // Caelestia Lockscreen hotkeys disabled per user request
+            let is_lock_hotkey = false;
+            if is_lock_hotkey {
+                if is_down {
+                    let active = !LOCKSCREEN_ACTIVE.load(Ordering::Relaxed);
+                    LOCKSCREEN_ACTIVE.store(active, Ordering::Relaxed);
                     send_start_menu_mask();
+                    if active {
+                        // Background memory boost when locking: free memory from background browsers & apps
+                        tauri::async_runtime::spawn_blocking(|| {
+                            let _ = crate::optimizer::execute_smart_boost();
+                        });
+                    }
                     if let Some(app) = KEYBOARD_HOOK_APP_HANDLE.get().cloned() {
                         tauri::async_runtime::spawn(async move {
                             if active {
@@ -406,19 +473,24 @@ unsafe extern "system" fn keyboard_hook_proc(
                                     let _ = win.set_ignore_cursor_events(false);
                                     let _ = win.show();
                                     if let Ok(hwnd) = win.hwnd() {
+                                        unsafe {
+                                            use windows::Win32::Graphics::Gdi::SetWindowRgn;
+                                            let _ = SetWindowRgn(hwnd, None, true);
+                                        }
                                         crate::utils::activate_and_focus_window(hwnd);
                                     }
                                     let _ = win.set_focus();
                                 }
-                                let _ = app.emit_to("overlay", "spotlight-toggle", true);
+                                let _ = app.emit_to("overlay", "lockscreen-toggle", true);
                             } else {
                                 if let Some(win) = app.get_webview_window("overlay") {
                                     let _ = win.set_ignore_cursor_events(true);
+                                    let _ = win.hide();
                                     if let Ok(hwnd) = win.hwnd() {
                                         crate::utils::re_assert_topmost(hwnd);
                                     }
                                 }
-                                let _ = app.emit_to("overlay", "spotlight-toggle", false);
+                                let _ = app.emit_to("overlay", "lockscreen-toggle", false);
                             }
                         });
                     }
@@ -429,7 +501,7 @@ unsafe extern "system" fn keyboard_hook_proc(
             }
 
             // Quick Look with Space in File Explorer (pure Space only)
-            if is_space && !alt_active && !win_down && !ctrl_phys_down {
+            if is_space && !alt_active && !win_down && !ctrl_phys_down && !LOCKSCREEN_ACTIVE.load(Ordering::Relaxed) {
                 if QUICK_LOOK_ACTIVE.load(Ordering::Relaxed) {
                     if is_down {
                         QUICK_LOOK_ACTIVE.store(false, Ordering::Relaxed);
@@ -497,7 +569,7 @@ unsafe extern "system" fn keyboard_hook_proc(
             }
 
             // Exposé / Mission Control Grid with F3
-            if is_f3 && !alt_down && !win_down {
+            if is_f3 && !alt_down && !win_down && !LOCKSCREEN_ACTIVE.load(Ordering::Relaxed) {
                 if is_down {
                     let active = !EXPOSE_ACTIVE.load(Ordering::Relaxed);
                     EXPOSE_ACTIVE.store(active, Ordering::Relaxed);
@@ -509,8 +581,13 @@ unsafe extern "system" fn keyboard_hook_proc(
                                     let _ = win.set_ignore_cursor_events(false);
                                     let _ = win.show();
                                     if let Ok(hwnd) = win.hwnd() {
-                                        crate::utils::re_assert_topmost(hwnd);
+                                        unsafe {
+                                            use windows::Win32::Graphics::Gdi::SetWindowRgn;
+                                            let _ = SetWindowRgn(hwnd, None, true);
+                                        }
+                                        crate::utils::activate_and_focus_window(hwnd);
                                     }
+                                    let _ = win.set_focus();
                                 }
                                 let _ = app.emit_to("overlay", "expose-toggle", true);
                             } else {
@@ -535,7 +612,7 @@ unsafe extern "system" fn keyboard_hook_proc(
             let is_win_tab_active = WIN_TAB_ACTIVE.load(Ordering::Relaxed);
 
             // Intercept Win + Tab for persistent 3D Task View
-            if is_tab && win_down && alt_tab_3d_enabled() {
+            if is_tab && win_down && alt_tab_3d_enabled() && !LOCKSCREEN_ACTIVE.load(Ordering::Relaxed) {
                 if is_down {
                     send_start_menu_mask();
                     dismiss_native_task_switcher();
@@ -586,6 +663,9 @@ unsafe extern "system" fn keyboard_hook_proc(
             // Intercept Alt + Tab for 3D Switcher
             let alt_is_active = alt_down;
             if is_tab && (alt_is_active || is_alt_tab_active) && !win_down && alt_tab_3d_enabled() {
+                if LOCKSCREEN_ACTIVE.load(Ordering::Relaxed) {
+                    return windows::Win32::Foundation::LRESULT(1);
+                }
                 if is_down {
                     if is_alt_tab_active && !alt_is_active {
                         // User already released Alt; commit selection immediately instead of stepping
@@ -636,8 +716,13 @@ unsafe extern "system" fn keyboard_hook_proc(
                                     let _ = win.set_ignore_cursor_events(false);
                                     let _ = win.show();
                                     if let Ok(hwnd) = win.hwnd() {
-                                        crate::utils::re_assert_topmost(hwnd);
+                                        unsafe {
+                                            use windows::Win32::Graphics::Gdi::SetWindowRgn;
+                                            let _ = SetWindowRgn(hwnd, None, true);
+                                        }
+                                        crate::utils::activate_and_focus_window(hwnd);
                                     }
+                                    let _ = win.set_focus();
                                 }
                                 let _ = app.emit_to("overlay", "alt-tab-open", dir);
                             });
@@ -735,20 +820,6 @@ unsafe extern "system" fn keyboard_hook_proc(
 
             if vk_code == VK_ESCAPE && is_down {
                 let mut handled = false;
-                if SPOTLIGHT_ACTIVE.swap(false, Ordering::Relaxed) {
-                    handled = true;
-                    if let Some(app) = KEYBOARD_HOOK_APP_HANDLE.get().cloned() {
-                        tauri::async_runtime::spawn(async move {
-                            if let Some(win) = app.get_webview_window("overlay") {
-                                let _ = win.set_ignore_cursor_events(true);
-                                if let Ok(hwnd) = win.hwnd() {
-                                    crate::utils::re_assert_topmost(hwnd);
-                                }
-                            }
-                            let _ = app.emit_to("overlay", "spotlight-toggle", false);
-                        });
-                    }
-                }
                 if QUICK_LOOK_ACTIVE.swap(false, Ordering::Relaxed) {
                     handled = true;
                     if let Some(app) = KEYBOARD_HOOK_APP_HANDLE.get().cloned() {
@@ -785,35 +856,17 @@ unsafe extern "system" fn keyboard_hook_proc(
             if vk_code == VK_LWIN || vk_code == VK_RWIN {
                 if is_down {
                     WIN_KEY_DOWN.store(true, Ordering::Relaxed);
-                    // A fresh Win press always starts a fresh combo, even if the
-                    // previous digit's keyup was missed.
+                    WIN_COMBO_USED.store(false, Ordering::Relaxed);
                     WIN_NUMBER_HELD.store(0, Ordering::Relaxed);
                 } else if is_up {
-                    let was_down = WIN_KEY_DOWN.swap(false, Ordering::Relaxed);
-                    let number_held = WIN_NUMBER_HELD.swap(0, Ordering::Relaxed);
-                    if was_down && number_held == 0 && !WIN_TAB_ACTIVE.load(Ordering::Relaxed) {
-                        let is_fs = CURRENT_FOREGROUND_FULLSCREEN.load(Ordering::Relaxed);
-                        if is_fs {
-                            // When in a fullscreen game, make sure Windows native taskbar and Start Search can appear
-                            unsafe {
-                                use windows::Win32::UI::WindowsAndMessaging::{FindWindowA, ShowWindow, SW_SHOW};
-                                let tray_class = windows::core::PCSTR(c"Shell_TrayWnd".as_ptr() as *const u8);
-                                if let Ok(tray_hwnd) = FindWindowA(tray_class, windows::core::PCSTR::null()) {
-                                    let _ = ShowWindow(tray_hwnd, SW_SHOW);
-                                }
-                            }
-                        } else {
-                            if let Some(app) = KEYBOARD_HOOK_APP_HANDLE.get().cloned() {
-                                tauri::async_runtime::spawn(async move {
-                                    let _ = app.emit("dock-edge-hover", true);
-                                });
-                            }
-                        }
-                    }
+                    WIN_KEY_DOWN.store(false, Ordering::Relaxed);
+                    WIN_COMBO_USED.store(false, Ordering::Relaxed);
+                    WIN_NUMBER_HELD.store(0, Ordering::Relaxed);
                     if WIN_TAB_ACTIVE.load(Ordering::Relaxed) {
                         send_start_menu_mask();
                     }
                 }
+                return windows::Win32::UI::WindowsAndMessaging::CallNextHookEx(None, code, wparam, lparam);
             } else if WIN_KEY_DOWN.load(Ordering::Relaxed) {
                 if let Some(index) = win_number_index(vk_code.0) {
                     let slot = index + 1;
@@ -840,7 +893,6 @@ unsafe extern "system" fn keyboard_hook_proc(
                     }
                 }
             }
-        }
     }
     windows::Win32::UI::WindowsAndMessaging::CallNextHookEx(None, code, wparam, lparam)
 }
@@ -1755,6 +1807,7 @@ pub fn setup_system_worker(app_handle: AppHandle) -> Sender<SystemCommand> {
                 if last_processed_media.elapsed().as_millis() >= 2000 {
                     last_processed_media = std::time::Instant::now();
                     let mut best_info: Option<MediaInfo> = None;
+                    let mut best_score: i32 = -1;
                     if let Some(ref mgr) = manager {
                         if let Ok(sessions) = mgr.GetSessions() {
                             for i in 0..sessions.Size().unwrap_or(0) {
@@ -1882,8 +1935,8 @@ pub fn setup_system_worker(app_handle: AppHandle) -> Sender<SystemCommand> {
                                                 .map(|d| d.as_millis() as u64)
                                                 .unwrap_or(0);
                                             let info = MediaInfo {
-                                                title,
-                                                artist,
+                                                title: title.clone(),
+                                                artist: artist.clone(),
                                                 is_playing,
                                                 has_media: true,
                                                 artwork,
@@ -1892,10 +1945,41 @@ pub fn setup_system_worker(app_handle: AppHandle) -> Sender<SystemCommand> {
                                                 seek_enabled,
                                                 position_updated_at: now_ms,
                                             };
-                                            if is_playing {
-                                                best_info = Some(info);
-                                                break;
-                                            } else if best_info.is_none() {
+
+                                            let app_id = session
+                                                .SourceAppUserModelId()
+                                                .unwrap_or_default()
+                                                .to_string()
+                                                .to_lowercase();
+                                            let is_music_app = app_id.contains("spotify")
+                                                || app_id.contains("applemusic")
+                                                || app_id.contains("tidal")
+                                                || app_id.contains("deezer")
+                                                || app_id.contains("musicbee")
+                                                || app_id.contains("foobar")
+                                                || app_id.contains("aimp")
+                                                || app_id.contains("vlc")
+                                                || app_id.contains("amazonmusic")
+                                                || app_id.contains("youtube music")
+                                                || app_id.contains("qobuz");
+
+                                            let title_lower = title.to_lowercase();
+                                            let is_likely_social = title_lower.contains("instagram")
+                                                || title_lower.contains("tiktok")
+                                                || title_lower.contains("reels")
+                                                || title_lower.contains("shorts");
+
+                                            let mut score = 0i32;
+                                            if is_music_app {
+                                                score += if is_playing { 100 } else { 40 };
+                                            } else if is_likely_social {
+                                                score += if is_playing { 10 } else { 1 };
+                                            } else {
+                                                score += if is_playing { 50 } else { 20 };
+                                            }
+
+                                            if score > best_score {
+                                                best_score = score;
                                                 best_info = Some(info);
                                             }
                                         }
@@ -2024,7 +2108,7 @@ pub fn setup_system_worker(app_handle: AppHandle) -> Sender<SystemCommand> {
         use windows::Win32::Graphics::Gdi::ClientToScreen;
         use windows::Win32::UI::WindowsAndMessaging::{
             GetClientRect, GetForegroundWindow, GetWindowLongW, GetWindowRect, IsIconic, IsWindow,
-            IsZoomed, GWL_STYLE, WS_CAPTION, WS_MAXIMIZE,
+            IsZoomed, GWL_STYLE, WS_MAXIMIZE,
         };
         let mut last_visible = true;
         let mut last_dock_overlap: Option<bool> = None;
@@ -2247,8 +2331,6 @@ pub fn setup_system_worker(app_handle: AppHandle) -> Sender<SystemCommand> {
                                     let is_primary = is_primary_monitor(mi.dwFlags);
                                     let is_maximized =
                                         IsZoomed(hwnd).as_bool() || (style & WS_MAXIMIZE.0) != 0;
-                                    let is_maximized_standard =
-                                        is_maximized && (style & WS_CAPTION.0) != 0;
 
                                     let mut is_client_fullscreen = false;
                                     let mut client_rect = RECT::default();
@@ -2275,10 +2357,16 @@ pub fn setup_system_worker(app_handle: AppHandle) -> Sender<SystemCommand> {
                                         && rect.right >= screen_rect.right
                                         && rect.bottom >= screen_rect.bottom;
 
-                                    // Truly fullscreen means client covers screen, OR window matches screen but is not just a standard maximized window
-                                    current_is_fs = is_primary
-                                        && (is_client_fullscreen || is_matches_screen)
-                                        && !is_maximized_standard;
+                                    let is_d3d_fs = windows::Win32::UI::Shell::SHQueryUserNotificationState().map(|state| {
+                                        state == windows::Win32::UI::Shell::QUNS_RUNNING_D3D_FULL_SCREEN
+                                            || state == windows::Win32::UI::Shell::QUNS_PRESENTATION_MODE
+                                    }).unwrap_or(false);
+
+                                    // Truly fullscreen means D3D/presentation fullscreen, OR client covers rcMonitor while not being simply maximized
+                                    current_is_fs = is_d3d_fs
+                                        || (is_primary
+                                            && (is_client_fullscreen || is_matches_screen)
+                                            && !is_maximized);
 
                                     if is_primary && (current_is_fs || is_maximized) {
                                         should_overlap = true;
@@ -2876,6 +2964,7 @@ static MH_RIGHT_EXPIRY_MS: AtomicI64 = AtomicI64::new(0);
 static MH_LAST_MONITOR_UPDATE_MS: AtomicI64 = AtomicI64::new(0);
 static MH_CACHED_MON_POS: Mutex<Option<(i32, i32)>> = Mutex::new(None);
 static MH_CACHED_MON_SIZE: Mutex<Option<(u32, u32)>> = Mutex::new(None);
+static MH_CACHED_VIRTUAL_BOUNDS: Mutex<Option<(i32, i32)>> = Mutex::new(None);
 static CAPTURE_UI_ACTIVE: AtomicBool = AtomicBool::new(false);
 static CAPTURE_RECHECK: AtomicBool = AtomicBool::new(true);
 static CAPTURE_LAST_SCAN_MS: AtomicI64 = AtomicI64::new(0);
@@ -3409,7 +3498,27 @@ fn update_main_interaction(
     let main_rect_val = MAIN_WINDOW_RECT.lock().ok().and_then(|g| *g);
 
     if let Some((win_pos, _)) = main_rect_val {
-        if let Ok(region) = NOTCH_RECT.try_lock() {
+        let mut hit_rects_matched = false;
+        if let Ok(hit_rects) = crate::state::NOTCH_HIT_RECTS.try_lock() {
+            if !hit_rects.is_empty() {
+                let pad_x = (20.0 * scale) as i32;
+                let pad_y = (10.0 * scale) as i32;
+                let in_any = hit_rects.iter().any(|r| {
+                    let rx = win_pos.x + (r.x as f64 * scale) as i32 - pad_x;
+                    let rw = (r.width as f64 * scale) as i32 + (pad_x * 2);
+                    let ry = win_pos.y + (r.y as f64 * scale) as i32;
+                    let rh = (r.height as f64 * scale) as i32 + pad_y;
+                    cursor.x >= rx && cursor.x <= (rx + rw) && cursor.y >= ry && cursor.y <= (ry + rh)
+                });
+                if in_any {
+                    is_click_interactive = true;
+                    hit_rects_matched = true;
+                }
+            }
+        }
+
+        if !hit_rects_matched {
+            if let Ok(region) = NOTCH_RECT.try_lock() {
             if let Some(r) = *region {
                 let pad_x = (20.0 * scale) as i32;
                 let pad_y_bottom = (5.0 * scale) as i32;
@@ -3457,6 +3566,7 @@ fn update_main_interaction(
                     is_click_interactive = true;
                 }
             }
+        }
         }
     }
 
@@ -3805,6 +3915,19 @@ fn is_cursor_in_notch_rect(cursor: windows::Win32::Foundation::POINT) -> bool {
         .and_then(|g| *g)
         .map(|(p, _)| (p.x, p.y))
         .unwrap_or((mon_x, mon_y));
+
+    if let Ok(hit_rects) = crate::state::NOTCH_HIT_RECTS.try_lock() {
+        if !hit_rects.is_empty() {
+            return hit_rects.iter().any(|r| {
+                let rx = win_x + r.x;
+                let rw = r.width;
+                let ry = win_y + r.y;
+                let rh = r.height;
+                cursor.x >= (rx - 25) && cursor.x <= (rx + rw + 25) && cursor.y >= (ry - 5) && cursor.y <= (ry + rh + 15)
+            });
+        }
+    }
+
     if let Ok(region) = NOTCH_RECT.try_lock() {
         if let Some(r) = *region {
             let rx = win_x + r.x;
@@ -3954,19 +4077,29 @@ fn process_mouse_position(app_handle: &AppHandle, cursor: windows::Win32::Founda
             return;
         }
 
-        // Refresh cached monitor info every 1s
+        // Refresh cached monitor and virtual screen bounds every 1s
         if now - MH_LAST_MONITOR_UPDATE_MS.load(Ordering::Relaxed) > 1000 {
             if let Ok(Some(monitor)) = app_handle.primary_monitor() {
                 let pos = *monitor.position();
                 let size = *monitor.size();
-                *MH_CACHED_MON_POS.lock().unwrap() = Some((pos.x, pos.y));
-                *MH_CACHED_MON_SIZE.lock().unwrap() = Some((size.width, size.height));
+                *MH_CACHED_MON_POS.lock().unwrap_or_else(|e| e.into_inner()) = Some((pos.x, pos.y));
+                *MH_CACHED_MON_SIZE.lock().unwrap_or_else(|e| e.into_inner()) = Some((size.width, size.height));
+                let (vx, vw) = unsafe {
+                    use windows::Win32::UI::WindowsAndMessaging::{
+                        GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_XVIRTUALSCREEN,
+                    };
+                    (
+                        GetSystemMetrics(SM_XVIRTUALSCREEN),
+                        GetSystemMetrics(SM_CXVIRTUALSCREEN),
+                    )
+                };
+                *MH_CACHED_VIRTUAL_BOUNDS.lock().unwrap_or_else(|e| e.into_inner()) = Some((vx, vx + vw));
                 MH_LAST_MONITOR_UPDATE_MS.store(now, Ordering::Relaxed);
             }
         }
 
-        let cached_pos = MH_CACHED_MON_POS.lock().unwrap().unwrap_or((0, 0));
-        let cached_size = MH_CACHED_MON_SIZE.lock().unwrap().unwrap_or((1920, 1080));
+        let cached_pos = MH_CACHED_MON_POS.lock().unwrap_or_else(|e| e.into_inner()).unwrap_or((0, 0));
+        let cached_size = MH_CACHED_MON_SIZE.lock().unwrap_or_else(|e| e.into_inner()).unwrap_or((1920, 1080));
         let mon_x = cached_pos.0;
         let mon_y = cached_pos.1;
         let mon_w = cached_size.0 as i32;
@@ -4085,6 +4218,27 @@ fn process_mouse_position(app_handle: &AppHandle, cursor: windows::Win32::Founda
             cursor.x >= rx && cursor.x <= rx + rw && cursor.y >= ry && cursor.y <= ry + rh
         });
 
+        let spotlight_is_active = SPOTLIGHT_ACTIVE.load(Ordering::Relaxed);
+        let is_dragging = unsafe {
+            use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_SWAPBUTTON};
+            use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON, VK_RBUTTON};
+            let primary_btn = if GetSystemMetrics(SM_SWAPBUTTON) != 0 {
+                VK_RBUTTON
+            } else {
+                VK_LBUTTON
+            };
+            GetAsyncKeyState(primary_btn.0 as i32) < 0
+        };
+
+        let cached_virt = MH_CACHED_VIRTUAL_BOUNDS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or((mon_x, mon_x + mon_w));
+        let virtual_left = cached_virt.0;
+        let virtual_right = cached_virt.1;
+        let has_left_neighbor = mon_x > virtual_left;
+        let has_right_neighbor = (mon_x + mon_w) < virtual_right;
+
         // --- Left Edge (Volume) ---
         if !fg_fs {
             let bloom_scale = crate::utils::get_bloom_scale(app_handle);
@@ -4096,11 +4250,15 @@ fn process_mouse_position(app_handle: &AppHandle, cursor: windows::Win32::Founda
                 .unwrap_or(1.0)
                 * bloom_scale;
             let nh = (240.0 * sc) as i32;
-            let min_y = mon_y + (40.0 * sc) as i32;
-            let max_y = mon_y + mon_h - (40.0 * sc) as i32;
+            let center_y = mon_y + (mon_h / 2);
+            let half_h = (nh / 2) + (16.0 * sc) as i32;
+            let min_y = center_y - half_h;
+            let max_y = center_y + half_h;
 
-            let at_left_edge = cursor.x >= (mon_x - 4)
-                && cursor.x <= (mon_x + (18.0 * sc) as i32)
+            let can_trigger_edge = !spotlight_is_active && !is_dragging && !has_left_neighbor;
+            let at_left_edge = can_trigger_edge
+                && cursor.x >= (mon_x - 4)
+                && cursor.x <= (mon_x + (12.0 * sc) as i32)
                 && cursor.y >= min_y
                 && cursor.y <= max_y;
 
@@ -4138,10 +4296,34 @@ fn process_mouse_position(app_handle: &AppHandle, cursor: windows::Win32::Founda
                 let _ = app_handle.emit("volume-edge-hover", final_left_hover);
                 MH_LAST_LEFT_EDGE_HOVER.store(new_val, Ordering::Relaxed);
                 if final_left_hover {
-                    if let Some(ov) = app_handle.get_webview_window("overlay") {
-                        sync_overlays(app_handle);
-                        let _ = ov.show();
-                    }
+                    let app2 = app_handle.clone();
+                    let _ = app_handle.run_on_main_thread(move || {
+                        if SPOTLIGHT_ACTIVE.load(Ordering::SeqCst) {
+                            return;
+                        }
+                        if MH_LAST_LEFT_EDGE_HOVER.load(Ordering::Relaxed) == 0 {
+                            return;
+                        }
+                        if let Some(ov) = app2.get_webview_window("overlay") {
+                            sync_overlays(&app2);
+                            if let Ok(hwnd) = ov.hwnd() {
+                                crate::utils::set_overlay_passive(hwnd);
+                                unsafe {
+                                    use windows::Win32::UI::WindowsAndMessaging::{
+                                        ShowWindow, SW_SHOWNOACTIVATE, SetWindowPos, HWND_TOPMOST,
+                                        SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+                                    };
+                                    let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+                                    let _ = SetWindowPos(
+                                        hwnd,
+                                        Some(HWND_TOPMOST),
+                                        0, 0, 0, 0,
+                                        SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE,
+                                    );
+                                }
+                            }
+                        }
+                    });
                 }
             }
         } else {
@@ -4163,24 +4345,15 @@ fn process_mouse_position(app_handle: &AppHandle, cursor: windows::Win32::Founda
                 .unwrap_or(1.0)
                 * bloom_scale;
             let nh = (240.0 * sc) as i32;
-            let min_y = mon_y + (40.0 * sc) as i32;
-            let max_y = mon_y + mon_h - (40.0 * sc) as i32;
+            let center_y = mon_y + (mon_h / 2);
+            let half_h = (nh / 2) + (16.0 * sc) as i32;
+            let min_y = center_y - half_h;
+            let max_y = center_y + half_h;
 
-            // Detect right edge of Primary Monitor (including seam to secondary)
-            let on_primary_right = cursor.x >= (mon_x + mon_w - (18.0 * sc) as i32)
-                && cursor.x <= (mon_x + mon_w + (24.0 * sc) as i32);
-
-            // Also detect far right edge of multi-monitor virtual desktop setup
-            let virtual_right = unsafe {
-                windows::Win32::UI::WindowsAndMessaging::GetSystemMetrics(
-                    windows::Win32::UI::WindowsAndMessaging::SM_XVIRTUALSCREEN,
-                ) + windows::Win32::UI::WindowsAndMessaging::GetSystemMetrics(
-                    windows::Win32::UI::WindowsAndMessaging::SM_CXVIRTUALSCREEN,
-                )
-            };
-            let on_virtual_right = cursor.x >= (virtual_right - (18.0 * sc) as i32);
-
-            let at_right_edge = (on_primary_right || on_virtual_right)
+            let can_trigger_edge = !spotlight_is_active && !is_dragging && !has_right_neighbor;
+            let at_right_edge = can_trigger_edge
+                && cursor.x >= (mon_x + mon_w - (12.0 * sc) as i32)
+                && cursor.x <= (mon_x + mon_w)
                 && cursor.y >= min_y
                 && cursor.y <= max_y;
 
@@ -4210,10 +4383,34 @@ fn process_mouse_position(app_handle: &AppHandle, cursor: windows::Win32::Founda
                 let _ = app_handle.emit("brightness-edge-hover", final_right_hover);
                 MH_LAST_RIGHT_EDGE_HOVER.store(new_val, Ordering::Relaxed);
                 if final_right_hover {
-                    if let Some(ov) = app_handle.get_webview_window("overlay") {
-                        sync_overlays(app_handle);
-                        let _ = ov.show();
-                    }
+                    let app2 = app_handle.clone();
+                    let _ = app_handle.run_on_main_thread(move || {
+                        if SPOTLIGHT_ACTIVE.load(Ordering::SeqCst) {
+                            return;
+                        }
+                        if MH_LAST_RIGHT_EDGE_HOVER.load(Ordering::Relaxed) == 0 {
+                            return;
+                        }
+                        if let Some(ov) = app2.get_webview_window("overlay") {
+                            sync_overlays(&app2);
+                            if let Ok(hwnd) = ov.hwnd() {
+                                crate::utils::set_overlay_passive(hwnd);
+                                unsafe {
+                                    use windows::Win32::UI::WindowsAndMessaging::{
+                                        ShowWindow, SW_SHOWNOACTIVATE, SetWindowPos, HWND_TOPMOST,
+                                        SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+                                    };
+                                    let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+                                    let _ = SetWindowPos(
+                                        hwnd,
+                                        Some(HWND_TOPMOST),
+                                        0, 0, 0, 0,
+                                        SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE,
+                                    );
+                                }
+                            }
+                        }
+                    });
                 }
             }
         } else {
@@ -4228,10 +4425,20 @@ fn process_mouse_position(app_handle: &AppHandle, cursor: windows::Win32::Founda
         if let Some(ov_win) = app_handle.get_webview_window("overlay") {
             if fg_fs {
                 let prev = MH_LAST_OV_IGNORE.load(Ordering::Relaxed);
+                if prev != 1 {
+                    let app2 = app_handle.clone();
+                    let _ = app_handle.run_on_main_thread(move || {
+                        if SPOTLIGHT_ACTIVE.load(Ordering::SeqCst) {
+                            return;
+                        }
+                        if let Some(ov) = app2.get_webview_window("overlay") {
+                            if let Ok(hwnd) = ov.hwnd() {
+                                re_assert_topmost(hwnd);
+                            }
+                        }
+                    });
+                }
                 if let Ok(hwnd) = ov_win.hwnd() {
-                    if prev != 1 {
-                        re_assert_topmost(hwnd);
-                    }
                     set_click_through(hwnd, true);
                 }
                 MH_LAST_OV_IGNORE.store(1, Ordering::Relaxed);
@@ -4283,9 +4490,17 @@ fn process_mouse_position(app_handle: &AppHandle, cursor: windows::Win32::Founda
                 let prev = MH_LAST_OV_IGNORE.load(Ordering::Relaxed);
                 let new_val = if should_ignore { 1 } else { 0 };
                 if prev != new_val {
-                    if let Ok(hwnd) = ov_win.hwnd() {
-                        re_assert_topmost(hwnd);
-                    }
+                    let app2 = app_handle.clone();
+                    let _ = app_handle.run_on_main_thread(move || {
+                        if SPOTLIGHT_ACTIVE.load(Ordering::SeqCst) {
+                            return;
+                        }
+                        if let Some(ov) = app2.get_webview_window("overlay") {
+                            if let Ok(hwnd) = ov.hwnd() {
+                                re_assert_topmost(hwnd);
+                            }
+                        }
+                    });
                     MH_LAST_OV_IGNORE.store(new_val, Ordering::Relaxed);
                 }
                 // Every update, as for the notch and dock.
@@ -4492,9 +4707,18 @@ pub fn trigger_app_scan() {
 }
 
 /// Filters out shell entries that are not real launchable apps (web links,
-/// documents, protocol handlers, helpers) so the add-app list stays clean.
+/// documents, protocol handlers, helpers, repack ads) so the add-app list stays clean.
 fn is_launchable_entry(name: &str, path: &str) -> bool {
     if name.is_empty() || name == "Unknown" || is_helper_name(name) {
+        return false;
+    }
+    let lower_name = name.to_lowercase();
+    if lower_name.contains("elamigos")
+        || lower_name.contains("official site")
+        || lower_name.contains("releases and updates")
+        || lower_name.starts_with("==")
+        || lower_name.starts_with("__")
+    {
         return false;
     }
     let lower = path.to_lowercase();
@@ -4507,6 +4731,14 @@ fn is_launchable_entry(name: &str, path: &str) -> bool {
         || lower.starts_with("steam:")
         || lower.starts_with("::{")
         || (lower.starts_with("shell:") && !lower.starts_with("shell:appsfolder"))
+        || lower.ends_with(".url")
+        || lower.ends_with(".website")
+        || lower.ends_with(".html")
+        || lower.ends_with(".htm")
+        || lower.ends_with(".txt")
+        || lower.ends_with(".pdf")
+        || lower.ends_with(".chm")
+        || lower.contains("elamigos")
     {
         return false;
     }
@@ -4529,9 +4761,15 @@ fn is_helper_name(name: &str) -> bool {
         "troubleshoot",
         "troubleshooting",
         "repair",
+        "elamigos",
     ];
     let lower = name.to_lowercase();
-    if lower.contains("release notes") {
+    if lower.contains("release notes")
+        || lower.contains("releases and updates")
+        || lower.contains("official site")
+        || lower.contains("elamigos")
+        || lower.starts_with("==")
+    {
         return true;
     }
     lower
@@ -4556,14 +4794,10 @@ fn collect_shortcuts(dir: &std::path::Path, apps: &mut Vec<AppInfo>, depth: i32)
                     continue;
                 };
                 let name = file_stem.to_string_lossy().to_string();
-                if is_helper_name(&name) || name.starts_with("Install") {
+                let path_str = path.to_string_lossy().to_string();
+                if is_helper_name(&name) || name.starts_with("Install") || !is_launchable_entry(&name, &path_str) {
                     continue;
                 }
-
-                // Keep the .lnk itself: its args identify PWAs and arguments must be
-                // passed through when launching. The resolved target is stored as the
-                // executable name so pinned entries still match running windows.
-                let path_str = path.to_string_lossy().to_string();
                 let executable =
                     crate::utils::resolve_shortcut(&path_str).and_then(|(target, _args)| {
                         let file = std::path::Path::new(&target)
@@ -4610,6 +4844,7 @@ pub fn sync_overlays(app: &AppHandle) {
             let _ = ov_win.set_size(tauri::PhysicalSize::new(size.width, size.height));
         }
         if let Ok(hwnd) = ov_win.hwnd() {
+            OVERLAY_HWND.store(hwnd.0 as isize, Ordering::SeqCst);
             re_assert_topmost(hwnd);
         }
     }

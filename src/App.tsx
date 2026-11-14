@@ -15,16 +15,10 @@ import {
 import "./App.css";
 import { initTheme } from "./theme";
 import {
-	PlayIcon,
-	PauseIcon,
-	SkipBackIcon,
-	SkipForwardIcon,
-	VolumeLowIcon,
-	VolumeHighIcon,
-	MusicNoteIcon,
 	HeadphonesIcon
 } from "./icons";
 import { CompactMediaPlayer } from "./CompactMediaPlayer";
+import { connectGlazeWM, syncMaterialColors, type WorkspaceState } from "./services/caelestiaBridge";
 interface ActiveHeadphonesInfo {
 	id: string;
 	name: string;
@@ -69,7 +63,7 @@ function detectHeadphones(name: string): { isHeadphones: boolean; shortName: str
 
 	return { isHeadphones: true, shortName };
 }
-import { useLyrics } from "./hooks/useLyrics";
+import { useLyrics, isLikelyNonMusicVideo } from "./hooks/useLyrics";
 import { useWeather } from "./hooks/useWeather";
 import { useSettingsSync } from "./hooks/useSettingsSync";
 import { useTrailingThrottle } from "./hooks/useTrailingThrottle";
@@ -83,6 +77,11 @@ import { EdgeSurface } from "./components/EdgeSurface";
 import { JarvisIslandPill } from "./components/JarvisIslandPill";
 import { ShelfTypeIcon } from "./components/ShelfTypeIcon";
 import { DeskBoxHub } from "./components/DeskBoxHub";
+import { CaelestiaDashboard } from "./components/CaelestiaDashboard";
+import { CaelestiaCommandCenter } from "./components/CaelestiaCommandCenter";
+import { CaelestiaPerformance } from "./components/CaelestiaPerformance";
+import { CaelestiaWeatherTab } from "./components/CaelestiaWeatherTab";
+import "./components/CaelestiaTabs.css";
 import { WifiPanel } from "./components/WifiPanel";
 import { BluetoothPanel } from "./components/BluetoothPanel";
 import { AudioOutputPanel } from "./components/AudioOutputPanel";
@@ -92,13 +91,14 @@ import { deviceArtFor } from "./devices/deviceArtFor";
 import { deviceLookFor } from "./devices/deviceLooks";
 import type { BudLevel, BudsBattery } from "./devices/connectedDevices";
 import { ConnectedDevicesPanel } from "./components/ConnectedDevicesPanel";
-import { Calendar, calendarRows } from "./components/Calendar";
+import { Calendar } from "./components/Calendar";
 import { useConnectedDevices } from "./hooks/useConnectedDevices";
 import { isWiredAudio, usbArtFor, usbDisplayName, type UsbIdentity } from "./devices/usbArtFor";
 import type { DeviceArtKey } from "./devices/art";
 
 import {
 	Cpu,
+	Monitor,
 	MemoryStick,
 	HardDrive,
 	ArrowUpDown,
@@ -115,8 +115,8 @@ import {
 	Music,
 	Bot,
 	Zap,
-	CheckCircle,
-	ShieldCheck,
+	LayoutGrid,
+	CloudSun,
 	VolumeX,
 	Volume,
 	Volume1,
@@ -156,7 +156,6 @@ const asNotchPanel = (value: unknown): NotchPanel | null =>
 
 // The Connected devices panel grows with its list between these heights;
 // the maximum is the size the panel had before it grew to fit.
-const COMMAND_CENTER_WIDTH = 375;
 const DEVICES_MIN_HEIGHT = 150;
 const DEVICES_MAX_HEIGHT = 300;
 
@@ -641,58 +640,6 @@ function DeviceBudsBattery({ buds }: { buds: BudsBattery }) {
 // The shelf is a short-lived stash: one row, newest first, oldest evicted.
 const SHELF_MAX_ITEMS = 10;
 
-const MARQUEE_SPEED = 30; // px/s — constant for all titles
-const MARQUEE_MIN_DURATION = 5; // floor so short titles don't flicker
-
-const TitleMarquee = ({ title }: { title: string }) => {
-	const textRef = useRef<HTMLSpanElement>(null);
-	const containerRef = useRef<HTMLDivElement>(null);
-	const [isOverflowing, setIsOverflowing] = useState(false);
-	const [scrollDistance, setScrollDistance] = useState(0);
-	const [scrollDuration, setScrollDuration] = useState(8);
-
-	useEffect(() => {
-		const check = () => {
-			if (textRef.current && containerRef.current) {
-				const textWidth = textRef.current.scrollWidth;
-				const containerWidth = containerRef.current.clientWidth;
-				const overflow = textWidth > containerWidth;
-				setIsOverflowing(overflow);
-				if (overflow) {
-					const distance = textWidth - containerWidth;
-					setScrollDistance(distance);
-					setScrollDuration(Math.max(distance / MARQUEE_SPEED, MARQUEE_MIN_DURATION));
-				}
-			}
-		};
-		check();
-		const observer = new ResizeObserver(check);
-		if (containerRef.current) observer.observe(containerRef.current);
-		return () => observer.disconnect();
-	}, [title]);
-
-	return (
-		<div
-			ref={containerRef}
-			className="premium-title-wrap"
-			style={{ width: "100%", overflow: "hidden" }}
-		>
-			<span
-				ref={textRef}
-				className={`premium-title ${isOverflowing ? "marquee" : ""}`}
-				style={
-					{
-						"--scroll-distance": isOverflowing ? `-${scrollDistance}px` : undefined,
-						"--scroll-duration": `${scrollDuration}s`
-					} as React.CSSProperties
-				}
-			>
-				{title}
-			</span>
-		</div>
-	);
-};
-
 interface SmartBoostResult {
 	freed_mb: number;
 	processes_optimized: number;
@@ -738,7 +685,7 @@ function App() {
 	const [isOpen, setIsOpen] = useState(false);
 	const isOpenRef = useRef(false);
 	isOpenRef.current = isOpen;
-	const [isReady, setIsReady] = useState(false);
+	const [isReady, setIsReady] = useState(true);
 	const [scale, setScale] = useState(() =>
 		parseFloat(localStorage.getItem("bloom-notch-scale") || localStorage.getItem("bloom-scale") || "1.0")
 	);
@@ -929,7 +876,7 @@ function App() {
 	}, [mediaInfo.position_ms, mediaInfo.position_updated_at, mediaInfo.duration_ms, isPlaying]);
 
 	// Synchronized live lyrics from LRCLIB for the island
-	const { currentLine: islandLyricLine } = useLyrics(
+	const { currentLine: _islandLyricLine } = useLyrics(
 		mediaInfo.title,
 		mediaInfo.artist,
 		livePositionMs,
@@ -970,9 +917,20 @@ function App() {
 	const [diskSpace, setDiskSpace] = useState(0);
 	const [netUpSpeed, setNetUpSpeed] = useState(0);
 	const [netDownSpeed, setNetDownSpeed] = useState(0);
-	const [statusWidgets, setStatusWidgets] = useState<WidgetConfig>({
-		left: ["weather"],
-		right: ["battery"]
+	const [statusWidgets, setStatusWidgets] = useState<WidgetConfig>(() => {
+		try {
+			const saved = localStorage.getItem("bloom-status-widgets");
+			if (saved) {
+				const parsed = JSON.parse(saved);
+				if (parsed && Array.isArray(parsed.left) && Array.isArray(parsed.right)) {
+					return parsed;
+				}
+			}
+		} catch {}
+		return {
+			left: ["weather"],
+			right: ["ram", "battery"]
+		};
 	});
 
 	const [windowLabel, setWindowLabel] = useState<string>("");
@@ -1075,6 +1033,9 @@ function App() {
 	const [isOverlapped, setIsOverlapped] = useState(false);
 	const [interactionState, setInteractionState] = useState<"active" | "grace" | "none">("none");
 	const bloomRef = useRef<HTMLDivElement>(null);
+	const leftPillRef = useRef<HTMLDivElement>(null);
+	const rightPillRef = useRef<HTMLDivElement>(null);
+	const [workspaces, setWorkspaces] = useState<WorkspaceState[]>([]);
 	// Measured to fit the hovered status strip; see statusFitWidth.
 	const leftWidgetsRef = useRef<HTMLDivElement>(null);
 	const rightWidgetsRef = useRef<HTMLDivElement>(null);
@@ -1104,6 +1065,7 @@ function App() {
 		// glow less, and the screen corners nothing.
 		wanted.push(
 			...measureElements([
+				[".caelestia-pill", 16],
 				[".activity-bubble", 16],
 				[".status-tooltip", 28],
 				[".screen-corner", 0]
@@ -1152,8 +1114,37 @@ function App() {
 	}, [isVisible, isHidden, windowLabel]);
 
 	useEffect(() => {
+		syncMaterialColors();
+		const disconnectWM = connectGlazeWM(setWorkspaces);
+		return () => {
+			disconnectWM();
+		};
+	}, []);
+
+	useEffect(() => {
 		const updateRect = () => {
 			if (bloomRef.current && windowLabel === "main") {
+				// Caelestia 3-zone hit-test: logical CSS pixels
+				const hitElements = [
+					leftPillRef.current,
+					bloomRef.current,
+					rightPillRef.current,
+					musicBubbleRef.current,
+					shelfBubbleRef.current
+				].filter((el): el is HTMLDivElement | HTMLButtonElement => el !== null);
+
+				const hitRects = hitElements.map((el) => {
+					const r = el.getBoundingClientRect();
+					return {
+						x: Math.round(r.left),
+						y: Math.round(r.top),
+						width: Math.round(r.width),
+						height: Math.round(r.height)
+					};
+				});
+
+				invoke("update_notch_hit_rects", { rects: hitRects }).catch(() => {});
+
 				// Activity bubbles sit beside the pill and must stay clickable too.
 				const rects = [bloomRef.current, musicBubbleRef.current, shelfBubbleRef.current]
 					.filter((el): el is NonNullable<typeof el> => el !== null)
@@ -1179,7 +1170,9 @@ function App() {
 		updateRect();
 		window.addEventListener("resize", updateRect);
 		const observer = new ResizeObserver(updateRect);
+		if (leftPillRef.current) observer.observe(leftPillRef.current);
 		if (bloomRef.current) observer.observe(bloomRef.current);
+		if (rightPillRef.current) observer.observe(rightPillRef.current);
 
 		return () => {
 			window.removeEventListener("resize", updateRect);
@@ -2255,6 +2248,7 @@ function App() {
 	function panelEnabled(panel: NotchPanel) {
 		if (panel === "calendar") return settingsCalendarEnabled;
 		if (panel === "command-center") return settingsControlsPanelEnabled;
+		if (panel === "optimizer") return true;
 		return settingsDevicesPanelEnabled;
 	}
 
@@ -3445,12 +3439,15 @@ function App() {
 		return `${(bytes / (1024 * 1024)).toFixed(1)}M`;
 	};
 
-	// Music mode shows any time we have media info (playing or paused) and music mode setting is enabled
-	const isMusicMode = mediaInfo.has_media && bloomMode === "music" && settingsMusicModeEnabled;
+	// Detect if playing media is likely web video, reels, shorts, or non-music
+	const isWebOrReelMedia = isLikelyNonMusicVideo(mediaInfo.title, mediaInfo.artist);
+
+	// Music mode shows any time we have genuine song info (playing or paused) and music mode setting is enabled
+	const isMusicMode = (!isWebOrReelMedia && mediaInfo.has_media && bloomMode === "music" && settingsMusicModeEnabled) || (isOpen && bloomMode === "music");
 	// A media session remains reachable on hover after its activity fades, or
 	// whenever the compact music display is disabled.
 	const showMusicOnStatusHover =
-		!isOpen && isHovered && bloomMode === "status" && settingsMusicModeEnabled &&
+		!isOpen && isHovered && bloomMode === "status" && settingsMusicModeEnabled && !isWebOrReelMedia &&
 		mediaInfo.has_media && (!musicActivityVisible || !settingsMusicCompactNotch);
 	const showCompactMusicIcons = isMusicMode || showMusicOnStatusHover;
 
@@ -3461,29 +3458,62 @@ function App() {
 	const getDynamicWidth = () => {
 		if (bloomMode === "announcement" && announcement && !announcementDismissed) return 380;
 		if (bloomMode === "device" && deviceAlert) return 330;
-		if (isCalendarMode) return 480;
 		if (bloomMode === "shelf") return shelfViewMode === "deskbox" || shelfItems.length === 0 ? 410 : 380;
-		if (bloomMode === "optimizer" && isOpen) return 370;
-		if (bloomMode === "command-center" && isOpen) return COMMAND_CENTER_WIDTH;
-		if (bloomMode === "wifi" || bloomMode === "bluetooth" || bloomMode === "system-tray" || bloomMode === "audio-output") return COMMAND_CENTER_WIDTH;
-		if (bloomMode === "devices") return 350;
+		if (isOpen) {
+			if (bloomMode === "optimizer") return 680;
+			if (bloomMode === "music" || isMusicMode) return 680;
+			if (isCalendarMode) return 680;
+			if (bloomMode === "command-center") return 460;
+			if (bloomMode === "wifi" || bloomMode === "bluetooth" || bloomMode === "system-tray" || bloomMode === "audio-output") return 420;
+			if (bloomMode === "devices") return 350;
+		}
+
+		// When notch is closed / resting in status pill mode
+		if (!isOpen) {
+			if (showCompactMusicIcons) {
+				let w = 176 - clock24hTrim;
+				if (settingsVisualizerEnabled && isPlaying) w += 36;
+				if (settingsAlbumArtEnabled) w += 36;
+				return w;
+			}
+			const leftCount = statusWidgets.left.length;
+			const rightCount =
+				statusWidgets.right.length +
+				(activeHeadphones &&
+				!statusWidgets.left.includes("audio") &&
+				!statusWidgets.right.includes("audio")
+					? 1
+					: 0);
+			const totalWidgets = leftCount + rightCount;
+			if (totalWidgets > 0) {
+				const calculatedWidth = 160 - clock24hTrim + leftCount * 64 + rightCount * 64 + 28;
+				return Math.max(calculatedWidth, statusFitWidth);
+			}
+			return 172 - clock24hTrim;
+		}
+
 		if (showMusicOnStatusHover) {
 			return 170 + (settingsVisualizerEnabled ? 30 : 0);
 		}
-		if (bloomMode === "status" && isHovered) {
-			const totalWidgets = statusWidgets.left.length + statusWidgets.right.length;
-			return Math.max(Math.min(200 + totalWidgets * 50, 380) - clock24hTrim, statusFitWidth);
+		if (bloomMode === "status") {
+			const leftCount = statusWidgets.left.length;
+			const rightCount = statusWidgets.right.length + (activeHeadphones && !statusWidgets.left.includes("audio") && !statusWidgets.right.includes("audio") ? 1 : 0);
+			const totalWidgets = leftCount + rightCount;
+			if (totalWidgets > 0) {
+				const calculatedWidth = 160 - clock24hTrim + leftCount * 64 + rightCount * 64 + 28;
+				return Math.max(calculatedWidth, statusFitWidth);
+			}
+			return 172 - clock24hTrim;
 		}
-		if (isMusicMode && isOpen) {
-			if (lyricsExpanded) return 440;
-			return mediaLayout === "compact" ? 300 : 340;
+		if ((isMusicMode || bloomMode === "music") && isOpen) {
+			return 510;
 		}
 		if ((showPowerPulse || showLowBatteryPulse || showUpdatePulse) && !isHovered) return 200;
 
-		let w = 168 - clock24hTrim;
+		let w = 172 - clock24hTrim;
 		if (isMusicMode) {
-			if (settingsVisualizerEnabled && isPlaying) w += 32;
-			if (settingsAlbumArtEnabled) w += 32;
+			if (settingsVisualizerEnabled && isPlaying) w += 34;
+			if (settingsAlbumArtEnabled) w += 34;
 		}
 
 		return w;
@@ -3500,8 +3530,8 @@ function App() {
 		}
 		// Device alert: the drawing, with room for its motion.
 		if (bloomMode === "device" && deviceAlert) return 76;
-		// Sized to the calendar's week-row count plus the timer's fixed content.
-		if (bloomMode === "calendar") return 112 + calendarRows(calendarMonth, calendarMondayFirst) * 30;
+		// Sized to the weather bar plus calendar's week-row count plus the timer's fixed content.
+		if (bloomMode === "calendar" && isOpen) return 340;
 		// Shelf expands on mode alone (no hover needed: there is no cursor
 		// hover during an OS drag) and is sized to exactly one row of tiles,
 		// plus room for the scrollbar once the tiles overflow it.
@@ -3509,23 +3539,17 @@ function App() {
 			if (shelfViewMode === "deskbox" || shelfItems.length === 0) return 245;
 			return shelfOverflowing ? 190 : 176;
 		}
-		if (bloomMode === "optimizer") return isOpen ? 220 : 36;
-		if (bloomMode === "command-center") return isOpen ? 230 : 36;
+		if (bloomMode === "optimizer") return isOpen ? 450 : 36;
+		if (bloomMode === "command-center") return isOpen ? 420 : 36;
 		if (bloomMode === "devices") {
-			return devicesPanelHeight;
+			return isOpen ? devicesPanelHeight : 36;
 		}
-		if (bloomMode === "wifi" || bloomMode === "bluetooth") return 300;
-		if (bloomMode === "system-tray") return 340;
-		if (bloomMode === "audio-output") return 280;
+		if (bloomMode === "wifi" || bloomMode === "bluetooth") return isOpen ? 380 : 36;
+		if (bloomMode === "system-tray") return isOpen ? 380 : 36;
+		if (bloomMode === "audio-output") return isOpen ? 340 : 36;
 		if (bloomMode === "status") return 36;
-		if (isMusicMode && isOpen) {
-			const hasProgressBar = (mediaInfo.duration_ms ?? 0) > 0;
-			let h = mediaLayout === "compact" ? (hasProgressBar ? 132 : 116) : 120;
-			if (mediaLayout === "compact") {
-				if (compactVolumeExpanded) h += 36;
-				if (lyricsExpanded) h += 270;
-			}
-			return h;
+		if ((isMusicMode || bloomMode === "music") && isOpen) {
+			return 420;
 		}
 		return 36;
 	};
@@ -3562,7 +3586,7 @@ function App() {
 		pillTargetY,
 		pillTargetWidth,
 		pillTargetHeight,
-		24
+		14
 	);
 
 	// Clip the notch window to what it draws (see window_region.rs): outside
@@ -3604,10 +3628,33 @@ function App() {
 					position: "relative"
 				}}
 			>
+				{/* BLOQUE IZQUIERDO: Workspaces de GlazeWM */}
+				<div
+					ref={leftPillRef}
+					className="caelestia-pill"
+					style={{
+						position: "absolute",
+						left: 12,
+						top: 6
+					}}
+				>
+					{workspaces.length > 0 ? (
+						workspaces.map((ws) => (
+							<button
+								key={ws.name}
+								className={`ws-dot ${ws.hasFocus ? "active" : ""}`}
+								style={{ width: ws.hasFocus ? 26 : 8 }}
+								title={ws.displayName || ws.name}
+							/>
+						))
+					) : (
+						<span style={{ fontSize: 12, opacity: 0.8, fontFamily: "monospace" }}>WS 1</span>
+					)}
+				</div>
 				<DeviceArtDefs />
 				<motion.div
 					ref={bloomRef}
-					className={`bloom ${isHovered ? "expanded" : ""} ${isImpacted ? "is-impacted" : ""} ${isDragHovering ? "drag-hover" : ""}`}
+					className={`bloom ${isHovered || isOpen ? "expanded" : ""} ${isImpacted ? "is-impacted" : ""} ${isDragHovering ? "drag-hover" : ""}`}
 					onMouseEnter={() => setIsNotchHovered(true)}
 					onMouseLeave={() => setIsNotchHovered(false)}
 					onWheel={handleWheel}
@@ -3651,7 +3698,11 @@ function App() {
 						// Hovering the shelf cancels its post-drop auto-close.
 						if (bloomMode === "shelf") clearShelfCollapse();
 					}}
-					onHoverEnd={releaseNotchHover}
+					onHoverEnd={() => {
+						if (!isOpen) {
+							releaseNotchHover();
+						}
+					}}
 					style={{ originY: 0 }}
 					transition={{
 						width: { type: "spring", stiffness: 400, damping: 31 },
@@ -3710,18 +3761,101 @@ function App() {
 									overflow: "hidden"
 								}}
 							>
+								{/* Caelestia Tab Header when expanded */}
+								{isOpen && bloomMode !== "announcement" && bloomMode !== "device" && (
+									<motion.div
+										key="caelestia-tabs-nav"
+										className="caelestia-tabs-nav"
+										onClick={(e) => e.stopPropagation()}
+										initial={{ opacity: 0, y: -4 }}
+										animate={{ opacity: 1, y: 0 }}
+										transition={{ duration: 0.15 }}
+									>
+										<button
+											type="button"
+											className={`caelestia-tab ${bloomMode === "command-center" || bloomMode === "wifi" || bloomMode === "bluetooth" || bloomMode === "system-tray" || bloomMode === "audio-output" ? "active" : ""}`}
+											onClick={() => setBloomMode("command-center")}
+										>
+											<LayoutGrid size={12} strokeWidth={2.2} />
+											<span>Dashboard</span>
+										</button>
+										<button
+											type="button"
+											className={`caelestia-tab ${bloomMode === "music" ? "active" : ""}`}
+											onClick={() => setBloomMode("music")}
+										>
+											<Music size={12} strokeWidth={2.2} />
+											<span>Media</span>
+										</button>
+										<button
+											type="button"
+											className={`caelestia-tab ${bloomMode === "optimizer" ? "active" : ""}`}
+											onClick={() => setBloomMode("optimizer")}
+										>
+											<Zap size={12} strokeWidth={2.2} />
+											<span>Performance</span>
+										</button>
+										<button
+											type="button"
+											className={`caelestia-tab ${bloomMode === "calendar" ? "active" : ""}`}
+											onClick={() => setBloomMode("calendar")}
+										>
+											<CloudSun size={12} strokeWidth={2.2} />
+											<span>Weather</span>
+										</button>
+									</motion.div>
+								)}
+
 								{/* Faster Waiting Transition Area */}
 								<AnimatePresence mode="wait">
-									{isOpen && isMusicMode && !isCalendarMode ? (
-										<motion.div
-											key="expanded-music"
-											className="expanded-music-container"
-											initial={{ opacity: 0, scale: 0.98 }}
-											animate={{ opacity: 1, scale: 1 }}
-											exit={{ opacity: 0, scale: 0.98, transition: { duration: 0.1 } }}
-											transition={{ type: "spring", stiffness: 500, damping: 30 }}
-										>
-											{mediaLayout === "compact" ? (
+									{isOpen ? (
+										bloomMode === "command-center" ? (
+											<motion.div
+												key="caelestia-command-center"
+												initial={{ opacity: 0, scale: 0.98 }}
+												animate={{ opacity: 1, scale: 1 }}
+												exit={{ opacity: 0, scale: 0.98 }}
+												transition={{ duration: 0.15 }}
+												style={{ width: "100%", height: "100%" }}
+											>
+												<CaelestiaCommandCenter />
+											</motion.div>
+										) : bloomMode === "optimizer" ? (
+											<motion.div
+												key="caelestia-performance"
+												initial={{ opacity: 0, scale: 0.98 }}
+												animate={{ opacity: 1, scale: 1 }}
+												exit={{ opacity: 0, scale: 0.98 }}
+												transition={{ duration: 0.15 }}
+												style={{ width: "100%", height: "100%" }}
+											>
+												<CaelestiaPerformance />
+											</motion.div>
+										) : bloomMode === "calendar" ? (
+											<motion.div
+												key="caelestia-weather"
+												initial={{ opacity: 0, scale: 0.98 }}
+												animate={{ opacity: 1, scale: 1 }}
+												exit={{ opacity: 0, scale: 0.98 }}
+												transition={{ duration: 0.15 }}
+												style={{ width: "100%", height: "100%" }}
+											>
+												<CaelestiaWeatherTab
+													temperature={temperature}
+													weatherCondition={weatherCondition}
+													cityName={cityName}
+													tempUnit={tempUnit}
+												/>
+											</motion.div>
+										) : bloomMode === "music" || isMusicMode ? (
+											<motion.div
+												key="expanded-music"
+												className="expanded-music-container"
+												initial={{ opacity: 0, scale: 0.98 }}
+												animate={{ opacity: 1, scale: 1 }}
+												exit={{ opacity: 0, scale: 0.98, transition: { duration: 0.1 } }}
+												transition={{ type: "spring", stiffness: 500, damping: 30 }}
+											>
 												<CompactMediaPlayer
 													mediaInfo={mediaInfo}
 													albumArtUrl={albumArtUrl}
@@ -3745,246 +3879,32 @@ function App() {
 													onAnimateNext={animateNext}
 													onLayoutChange={(layout) => {
 														setMediaLayout(layout);
-														localStorage.setItem("bloom-media-layout", layout);
-														invoke("save_setting", {
-															key: "bloom-media-layout",
-															value: layout
-														}).catch(console.error);
-														window.dispatchEvent(
-															new CustomEvent("settings-changed", {
-																detail: { key: "media-layout", value: layout }
-															})
-														);
 													}}
 													onAudioOutputClick={() => setBloomMode("audio-output")}
+													isCaelestia={true}
 												/>
-											) : (
-												<div className="compact-premium-layout">
-													<div className="album-art-section">
-														<motion.div
-															className="premium-album-art"
-															whileHover={{ scale: 1.05 }}
-															whileTap={{ scale: 0.95 }}
-															onClick={(e) => {
-																e.stopPropagation();
-																setMediaLayout("compact");
-																localStorage.setItem("bloom-media-layout", "compact");
-																invoke("save_setting", {
-																	key: "bloom-media-layout",
-																	value: "compact"
-																}).catch(console.error);
-																window.dispatchEvent(
-																	new CustomEvent("settings-changed", {
-																		detail: { key: "media-layout", value: "compact" }
-																	})
-																);
-															}}
-															style={{ cursor: "pointer" }}
-														>
-															<AnimatePresence mode="wait" initial={false}>
-																{albumArtUrl ? (
-																	<motion.img
-																		key={`art-${albumArtKey}`}
-																		src={albumArtUrl}
-																		alt="Art"
-																		initial={{ rotateY: 90, opacity: 0 }}
-																		animate={{ rotateY: 0, opacity: 1 }}
-																		exit={{ rotateY: -90, opacity: 0 }}
-																		transition={{ duration: 0.3, ease: "easeInOut" }}
-																		style={{ width: "100%", height: "100%", objectFit: "cover" }}
-																	/>
-																) : (
-																	<motion.div
-																		key="placeholder"
-																		className="art-placeholder-mini"
-																		initial={{ rotateY: 90, opacity: 0 }}
-																		animate={{ rotateY: 0, opacity: 1 }}
-																		exit={{ rotateY: -90, opacity: 0 }}
-																		transition={{ duration: 0.3, ease: "easeInOut" }}
-																	>
-																		<MusicNoteIcon size={32} className="music-placeholder-svg" />
-																	</motion.div>
-																)}
-															</AnimatePresence>
-														</motion.div>
-													</div>
-
-													<div className="metadata-controls-section-middle">
-														<div className="track-header-row">
-															<div className="track-info-middle">
-																<TitleMarquee title={mediaInfo.title} />
-																<span
-																	className={`premium-artist ${islandLyricLine ? "premium-artist-lyric" : ""}`}
-																	title="Letra en tiempo real (LRCLIB)"
-																>
-																	{islandLyricLine ? `♪ ${islandLyricLine}` : mediaInfo.artist}
-																</span>
-															</div>
-															<div className="header-visualizer-wrap">
-																<div className="header-visualizer">
-																	<Visualizer isPlaying={isPlaying} bars={5} height={18} />
-																</div>
-																<motion.button
-																	className="classic-audio-output-btn"
-																	onClick={(e) => {
-																		e.stopPropagation();
-																		setBloomMode("audio-output");
-																	}}
-																	whileTap={{ scale: 0.9 }}
-																	title="Audio Output"
-																>
-																	<HeadphonesIcon size={20} style={{ opacity: 0.5 }} />
-																</motion.button>
-															</div>
-														</div>
-
-														<div className="controls-row-sleek">
-															<motion.button
-																className="sleek-btn previous-btn"
-																onClick={(e) => {
-																	e.stopPropagation();
-																	animatePrev();
-																}}
-																whileHover={{ scale: 1.2 }}
-																whileTap={{ scale: 0.9 }}
-																transition={{ type: "spring", stiffness: 400, damping: 25 }}
-															>
-																<div
-																	style={{
-																		position: "relative",
-																		width: 32,
-																		height: 16,
-																		overflow: "hidden"
-																	}}
-																>
-																	<motion.div
-																		animate={prevBack}
-																		style={{
-																			position: "absolute",
-																			inset: 0,
-																			display: "flex",
-																			alignItems: "center",
-																			justifyContent: "center"
-																		}}
-																	>
-																		<SkipBackIcon size={32} />
-																	</motion.div>
-																	<motion.div
-																		animate={prevFront}
-																		style={{
-																			position: "absolute",
-																			inset: 0,
-																			display: "flex",
-																			alignItems: "center",
-																			justifyContent: "center"
-																		}}
-																	>
-																		<SkipBackIcon size={32} />
-																	</motion.div>
-																</div>
-															</motion.button>
-
-															<motion.button
-																className="sleek-btn play-pause-btn-floating"
-																onClick={(e) => {
-																	e.stopPropagation();
-																	togglePlayPause();
-																}}
-																whileHover={{ scale: 1.2 }}
-																whileTap={{ scale: 0.95 }}
-																transition={{ type: "spring", stiffness: 400, damping: 25 }}
-															>
-																<AnimatePresence mode="wait" initial={false}>
-																	<motion.div
-																		key={isPlaying ? "pause" : "play"}
-																		initial={{ opacity: 0, scale: 0.8 }}
-																		animate={{ opacity: 1, scale: 1 }}
-																		exit={{ opacity: 0, scale: 0.8 }}
-																		transition={{ duration: 0.15 }}
-																		style={{
-																			display: "flex",
-																			alignItems: "center",
-																			justifyContent: "center"
-																		}}
-																	>
-																		{isPlaying ? <PauseIcon size={26} /> : <PlayIcon size={26} />}
-																	</motion.div>
-																</AnimatePresence>
-															</motion.button>
-
-															<motion.button
-																className="sleek-btn next-btn"
-																onClick={(e) => {
-																	e.stopPropagation();
-																	animateNext();
-																}}
-																whileHover={{ scale: 1.2 }}
-																whileTap={{ scale: 0.9 }}
-																transition={{ type: "spring", stiffness: 400, damping: 25 }}
-															>
-																<div
-																	style={{
-																		position: "relative",
-																		width: 32,
-																		height: 16,
-																		overflow: "hidden"
-																	}}
-																>
-																	<motion.div
-																		animate={nextBack}
-																		style={{
-																			position: "absolute",
-																			inset: 0,
-																			display: "flex",
-																			alignItems: "center",
-																			justifyContent: "center"
-																		}}
-																	>
-																		<SkipForwardIcon size={32} />
-																	</motion.div>
-																	<motion.div
-																		animate={nextFront}
-																		style={{
-																			position: "absolute",
-																			inset: 0,
-																			display: "flex",
-																			alignItems: "center",
-																			justifyContent: "center"
-																		}}
-																	>
-																		<SkipForwardIcon size={32} />
-																	</motion.div>
-																</div>
-															</motion.button>
-														</div>
-
-														<div className="volume-slider-container">
-															<VolumeLowIcon size={12} style={{ opacity: 0.5 }} />
-															<div className="slider-track-premium">
-																<input
-																	type="range"
-																	min="0"
-																	max="1"
-																	step="0.01"
-																	aria-label="Volume"
-																	value={displayVolume}
-																	onChange={(e) => handleVolumeChange(parseFloat(e.target.value))}
-																	onPointerDown={(e) => e.stopPropagation()}
-																	onClick={(e) => e.stopPropagation()}
-																	className="premium-slider"
-																/>
-																<div
-																	className="slider-progress-fill"
-																	style={{ width: `${displayVolume * 100}%` }}
-																/>
-															</div>
-															<VolumeHighIcon size={14} style={{ opacity: 0.5 }} />
-														</div>
-													</div>
-												</div>
-											)}
-										</motion.div>
-									) : (
+											</motion.div>
+										) : (
+											<motion.div
+												key="caelestia-default-dash"
+												initial={{ opacity: 0, scale: 0.98 }}
+												animate={{ opacity: 1, scale: 1 }}
+												exit={{ opacity: 0, scale: 0.98 }}
+												transition={{ duration: 0.15 }}
+												style={{ width: "100%", height: "100%" }}
+											>
+												<CaelestiaDashboard
+													mediaInfo={mediaInfo}
+													temperature={temperature}
+													weatherCondition={weatherCondition}
+													cityName={cityName}
+													onTogglePlayPause={togglePlayPause}
+													onNext={animateNext}
+													onPrev={animatePrev}
+												/>
+											</motion.div>
+										)
+									) : !isOpen ? (
 										<motion.div
 											key="standard-view-group"
 											initial={{ opacity: 0, y: -5 }}
@@ -3995,6 +3915,11 @@ function App() {
 										>
 											<div
 												className="main-row"
+												onClick={(e) => {
+													if (isOpen) {
+														e.stopPropagation();
+													}
+												}}
 												// A device alert covers the whole pill.
 												style={bloomMode === "device" || deviceAlertOnScreen ? { visibility: "hidden" } : undefined}
 											>
@@ -4066,7 +3991,7 @@ function App() {
 																	</AnimatePresence>
 																)}
 
-																{!showCompactMusicIcons && isHovered && statusWidgets.left.length > 0 ? (
+																{!showCompactMusicIcons && statusWidgets.left.length > 0 ? (
 																	<motion.div
 																		key="left-widgets"
 																		ref={leftWidgetsRef}
@@ -4164,7 +4089,7 @@ function App() {
 
 															{/* Right: album art on a retained music session, otherwise status widgets */}
 															<div className="side-content right">
-																{showCompactMusicIcons && (settingsAlbumArtEnabled || showMusicOnStatusHover) ? (
+																{showCompactMusicIcons && (settingsAlbumArtEnabled || showMusicOnStatusHover) && albumArtUrl ? (
 																	<AnimatePresence mode="wait">
 																		<motion.div
 																			key="album-art"
@@ -4197,7 +4122,7 @@ function App() {
 																			>
 																				<div className="album-art-inner">
 																					<AnimatePresence mode="wait" initial={false}>
-																						{settingsAlbumArtEnabled && albumArtUrl ? (
+																						{albumArtUrl && (
 																							<motion.img
 																								key={`compact-art-${albumArtKey}`}
 																								src={albumArtUrl}
@@ -4213,24 +4138,13 @@ function App() {
 																									objectFit: "cover"
 																								}}
 																							/>
-																						) : (
-																							<motion.div
-																								key="compact-placeholder"
-																								className="album-art-placeholder"
-																								initial={{ rotateY: 90, opacity: 0 }}
-																								animate={{ rotateY: 0, opacity: 1 }}
-																								exit={{ rotateY: -90, opacity: 0 }}
-																								transition={{ duration: 0.25, ease: "easeInOut" }}
-																							>
-																								<MusicNoteIcon className="music-placeholder-svg-small" />
-																							</motion.div>
 																						)}
 																					</AnimatePresence>
 																				</div>
 																			</button>
 																		</motion.div>
 																	</AnimatePresence>
-																) : !showCompactMusicIcons && isHovered && (statusWidgets.right.length > 0 || activeHeadphones) ? (
+																) : !showCompactMusicIcons && (statusWidgets.right.length > 0 || activeHeadphones) ? (
 																	<motion.div
 																		key="right-widgets"
 																		ref={rightWidgetsRef}
@@ -4269,7 +4183,7 @@ function App() {
 												</AnimatePresence>
 											</div>
 										</motion.div>
-									)}
+									) : null}
 								</AnimatePresence>
 
 								{/* Wi-Fi networks, opened from the controls panel's Wi-Fi tile */}
@@ -4359,432 +4273,6 @@ function App() {
 												lowThreshold={lowBatteryThreshold}
 												onContentHeight={setDevicesContentHeight}
 											/>
-										</motion.div>
-									)}
-								</AnimatePresence>
-
-								{/* Command Center Panel */}
-								<AnimatePresence>
-									{isOpen && bloomMode === "command-center" && (
-										<motion.div
-											className="command-center-content-minimal"
-											onClick={(e) => e.stopPropagation()}
-											initial={{ opacity: 0 }}
-											animate={{ opacity: 1 }}
-											exit={{ opacity: 0, filter: "blur(4px)", transition: { duration: 0.1 } }}
-											transition={{ type: "spring", stiffness: 400, damping: 30 }}
-										>
-											{/* Pills Grid */}
-											<div className="cc-pills-grid">
-												{/* Wi-Fi Pill */}
-												<div
-													className={`cc-pill-tile ${wifiEnabled ? "active" : ""}`}
-													onClick={(e) => {
-														e.stopPropagation();
-														toggleWifi();
-													}}
-													onContextMenu={handleWifiRightClick}
-													title="Left-click to toggle, Right-click for networks"
-												>
-													<div className="cc-pill-icon-wrapper">
-														<WifiIcon enabled={wifiEnabled} connected={wifiConnected} />
-													</div>
-													<div className="cc-pill-info">
-														<span className="cc-pill-title">Wi-Fi</span>
-														<span className="cc-pill-status">
-															{wifiStatus === null
-																? "…"
-																: !wifiEnabled
-																	? "Off"
-																	: wifiConnected
-																		? (wifiStatus?.ssid ?? "Connected")
-																		: "Not connected"}
-														</span>
-													</div>
-													<button
-														className="cc-pill-more"
-														aria-label="Wi-Fi networks"
-														title="Wi-Fi networks"
-														onClick={(e) => {
-															e.stopPropagation();
-															setBloomMode("wifi");
-														}}
-													>
-														<ChevronRight />
-													</button>
-												</div>
-
-												{/* Dock Mode Pill */}
-												<div
-													className={`cc-pill-tile ${dockMode === "fixed" ? "active" : ""}`}
-													onClick={toggleDockModeSetting}
-													title="Cycle dock mode: Fixed / Smart / Peek"
-												>
-													<div className="cc-pill-icon-wrapper">
-														<DockIcon />
-													</div>
-													<div className="cc-pill-info">
-														<span className="cc-pill-title">Dock Mode</span>
-														<span className="cc-pill-status">
-															{dockMode === "fixed"
-																? "Fixed"
-																: dockMode === "smart"
-																	? "Smart"
-																	: "Peek"}
-														</span>
-													</div>
-												</div>
-
-												{/* Bluetooth Pill */}
-												<div
-													className={`cc-pill-tile ${bluetoothEnabled ? "active" : ""}`}
-													onClick={(e) => {
-														e.stopPropagation();
-														toggleBluetooth();
-													}}
-													onContextMenu={handleBluetoothRightClick}
-													title="Left-click to toggle, Right-click for devices"
-												>
-													<div className="cc-pill-icon-wrapper">
-														<BluetoothIcon />
-													</div>
-													<div className="cc-pill-info">
-														<span className="cc-pill-title">Bluetooth</span>
-														<span className="cc-pill-status">
-															{!bluetoothEnabled
-																? "Off"
-																: btConnectedNames.length === 1
-																	? btConnectedNames[0]
-																	: btConnectedNames.length > 1
-																		? `${btConnectedNames.length} connected`
-																		: "On"}
-														</span>
-													</div>
-													<button
-														className="cc-pill-more"
-														aria-label="Bluetooth devices"
-														title="Bluetooth devices"
-														onClick={(e) => {
-															e.stopPropagation();
-															setBloomMode("bluetooth");
-														}}
-													>
-														<ChevronRight />
-													</button>
-												</div>
-
-												{/* Notch Mode Pill */}
-												<div
-													className={`cc-pill-tile ${notchMode === "fixed" ? "active" : ""}`}
-													onClick={toggleNotchModeSetting}
-													title="Cycle notch mode: Fixed / Smart / Peek"
-												>
-													<div className="cc-pill-icon-wrapper">
-														<NotchIcon />
-													</div>
-													<div className="cc-pill-info">
-														<span className="cc-pill-title">Notch Mode</span>
-														<span className="cc-pill-status">
-															{notchMode === "fixed"
-																? "Fixed"
-																: notchMode === "smart"
-																	? "Smart"
-																	: "Peek"}
-														</span>
-													</div>
-												</div>
-											</div>
-
-											{/* Circular Actions Row */}
-											<div className="cc-circular-actions-row">
-												<button
-													className="cc-circular-btn"
-													onClick={(e) => {
-														e.stopPropagation();
-														invoke("open_app", { appName: "ms-settings:notifications" }).catch(
-															console.error
-														);
-													}}
-													title="Do Not Disturb — Open Windows notification settings"
-												>
-													<MoonIcon />
-												</button>
-												<button
-													className={`cc-circular-btn ${batterySaverEnabled ? "active" : ""}`}
-													onClick={(e) => {
-														e.stopPropagation();
-														openBatterySaverSettings();
-													}}
-													title={`Energy Saver: ${batterySaverEnabled ? "On" : "Off"} — Click to open Settings`}
-												>
-													<BatterySaverIcon />
-												</button>
-												<button
-													className="cc-circular-btn"
-													onClick={(e) => {
-														e.stopPropagation();
-														setBloomMode("system-tray");
-													}}
-													title="System Tray"
-												>
-													<TrayIcon />
-												</button>
-												<button
-													className="cc-circular-btn"
-													onClick={(e) => {
-														e.stopPropagation();
-														setBloomMode("optimizer");
-													}}
-													title="Smart Boost (Optimizar RAM y Sistema)"
-												>
-													<Zap size={15} strokeWidth={2.2} />
-												</button>
-												<button
-													className="cc-circular-btn"
-													onClick={(e) => {
-														e.stopPropagation();
-														setBloomMode("shelf");
-													}}
-													title="Drop Shelf (Archivos y notas flotantes)"
-												>
-													<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2">
-														<path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.93a2 2 0 0 1-1.66-.9l-.82-1.2A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z" />
-														<path d="M12 10v6m-3-3 3 3 3-3" />
-													</svg>
-												</button>
-												<button
-													className="cc-circular-btn"
-													onClick={(e) => {
-														e.stopPropagation();
-														invoke("open_notification_center");
-													}}
-													title="Notification Center"
-												>
-													<BellIcon />
-												</button>
-												<button
-													className={`cc-circular-btn ${jarvisStatus?.online ? "active" : ""}`}
-													onClick={(e) => {
-														e.stopPropagation();
-														invoke("toggle_coucou_island").catch(() => {});
-													}}
-													title={`Coucou JARVIS: ${jarvisStatus?.state || "Listo"}`}
-												>
-													<Bot size={15} strokeWidth={2.2} />
-												</button>
-												<button
-													className="cc-circular-btn"
-													onClick={(e) => {
-														e.stopPropagation();
-														openSettingsWindow();
-													}}
-													title="Bloom Settings"
-												>
-													<SettingsIcon />
-												</button>
-												<button
-													className="cc-circular-btn"
-													onClick={(e) => {
-														e.stopPropagation();
-														invoke("restart_bloom");
-													}}
-													title="Restart Bloom"
-												>
-													<ReloadIcon />
-												</button>
-											</div>
-
-											{/* Classic Sliders Area */}
-											<div className="cc-classic-sliders-area">
-												{/* Volume Slider */}
-												<div className="cc-classic-slider-row">
-													<div className="cc-classic-slider-label">
-														<button
-															type="button"
-															className="cc-level-toggle"
-															onClick={toggleVolumeLevel}
-															aria-label={displayVolume > 0 ? "Mute volume" : "Restore volume"}
-															aria-pressed={displayVolume === 0}
-															title={displayVolume > 0 ? "Mute volume" : "Restore volume"}
-														>
-															<CommandVolumeIcon />
-														</button>
-														<span>Volume</span>
-													</div>
-													<div className="cc-classic-slider-track">
-														<input
-															type="range"
-															min="0"
-															max="1"
-															step="0.01"
-															aria-label="Volume"
-															value={displayVolume}
-															onChange={(e) => handleVolumeChange(parseFloat(e.target.value))}
-															onPointerDown={(e) => e.stopPropagation()}
-															onClick={(e) => e.stopPropagation()}
-															className="cc-classic-input"
-														/>
-														<div
-															className="cc-classic-fill"
-															style={{ width: `${displayVolume * 100}%` }}
-														/>
-													</div>
-													<button
-														className="cc-circular-btn"
-														style={{ width: 22, height: 22, padding: 0, minWidth: 22, border: "none" }}
-														onClick={(e) => {
-															e.stopPropagation();
-															setBloomMode("audio-output");
-														}}
-														title="Dispositivos de salida de audio"
-													>
-														<HeadphonesIcon size={12} style={{ opacity: 0.75 }} />
-													</button>
-													<span className="cc-classic-percentage">
-														{Math.round(displayVolume * 100)}%
-													</span>
-												</div>
-
-												{/* Brightness Slider */}
-												<div className="cc-classic-slider-row">
-													<div className="cc-classic-slider-label">
-														<button
-															type="button"
-															className="cc-level-toggle"
-															onClick={toggleBrightnessLevel}
-															aria-label={
-																currentBrightness > 0 ? "Minimize brightness" : "Restore brightness"
-															}
-															aria-pressed={currentBrightness === 0}
-															title={
-																currentBrightness > 0 ? "Minimize brightness" : "Restore brightness"
-															}
-														>
-															<CommandBrightnessIcon />
-														</button>
-														<span>Brightness</span>
-													</div>
-													<div className="cc-classic-slider-track">
-														<input
-															type="range"
-															min="0"
-															max="100"
-															step="1"
-															aria-label="Brightness"
-															value={currentBrightness}
-															onChange={(e) => handleBrightnessChange(parseInt(e.target.value))}
-															onPointerDown={(e) => e.stopPropagation()}
-															onClick={(e) => e.stopPropagation()}
-															className="cc-classic-input"
-														/>
-														<div
-															className="cc-classic-fill"
-															style={{ width: `${currentBrightness}%` }}
-														/>
-													</div>
-													<span className="cc-classic-percentage">{currentBrightness}%</span>
-												</div>
-											</div>
-										</motion.div>
-									)}
-								</AnimatePresence>
-
-								{/* Smart Boost / Optimizador del Sistema */}
-								<AnimatePresence>
-									{isOpen && bloomMode === "optimizer" && (
-										<motion.div
-											className="optimizer-container"
-											onClick={(e) => e.stopPropagation()}
-											initial={{ opacity: 0 }}
-											animate={{ opacity: 1 }}
-											exit={{ opacity: 0, filter: "blur(4px)", transition: { duration: 0.1 } }}
-											transition={{ type: "spring", stiffness: 400, damping: 30 }}
-										>
-											<div className="optimizer-header">
-												<div className="optimizer-title-row">
-													<span className="optimizer-badge">SMART BOOST</span>
-													<span className="optimizer-subtitle">
-														RAM: {hardwareStats ? `${hardwareStats.ram_used_gb} / ${hardwareStats.ram_total_gb} GB` : "32 GB"}
-													</span>
-												</div>
-												<div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-													<button
-														className="optimizer-close-btn"
-														onClick={(e) => {
-															e.stopPropagation();
-															setBloomMode("command-center");
-														}}
-														title="Volver a Centro de Control"
-													>
-														<ChevronRight style={{ transform: "rotate(180deg)" }} size={13} />
-													</button>
-													<button
-														className="optimizer-close-btn"
-														onClick={(e) => {
-															e.stopPropagation();
-															releaseNotchHover();
-														}}
-														title="Cerrar Isla"
-													>
-														<X size={13} strokeWidth={2.2} />
-													</button>
-												</div>
-											</div>
-
-											<div className="optimizer-body">
-												<div className="optimizer-gauge-card">
-													<div className="optimizer-gauge-top">
-														<span className="optimizer-card-label">Uso de Memoria</span>
-														<span className={`optimizer-card-val ${hardwareStats && hardwareStats.ram_percent > 80 ? "val-hot" : ""}`}>
-															{hardwareStats ? `${Math.round(hardwareStats.ram_percent)}%` : "—"}
-														</span>
-													</div>
-													<div className="optimizer-bar-track">
-														<div
-															className="optimizer-bar-fill"
-															style={{ width: `${Math.min(100, hardwareStats?.ram_percent ?? 0)}%` }}
-														/>
-													</div>
-													<div className="optimizer-gauge-meta">
-														<ShieldCheck size={12} className="meta-shield" />
-														<span>Protección activa: App en primer plano intacta</span>
-													</div>
-												</div>
-
-												<button
-													className={`optimizer-boost-btn ${isOptimizing ? "optimizing" : ""} ${boostResult ? "has-result" : ""}`}
-													onClick={handleSmartBoost}
-													disabled={isOptimizing}
-													title="Optimizar memoria de apps en reposo y purgar Standby List"
-												>
-													{isOptimizing ? (
-														<>
-															<RotateCcw size={14} className="spin-icon" strokeWidth={2.5} />
-															<span>Purgando procesos en reposo...</span>
-														</>
-													) : boostResult ? (
-														<>
-															<CheckCircle size={14} strokeWidth={2.5} style={{ color: "#34d399" }} />
-															<span>
-																{boostResult.freed_mb > 0
-																	? `¡${(boostResult.freed_mb / 1024).toFixed(1)} GB liberados!`
-																	: "¡Sistema optimizado!"}
-															</span>
-														</>
-													) : (
-														<>
-															<Zap size={14} strokeWidth={2.5} fill="currentColor" />
-															<span>Optimizar Todo el Sistema</span>
-														</>
-													)}
-												</button>
-
-												{boostResult && (
-													<div className="optimizer-result-note">
-														<span>✓ {boostResult.processes_optimized} apps podadas · Standby List purgada</span>
-													</div>
-												)}
-											</div>
 										</motion.div>
 									)}
 								</AnimatePresence>
@@ -4916,121 +4404,7 @@ function App() {
 									)}
 								</AnimatePresence>
 
-								{/* Calendar & Timer Split View */}
-								<AnimatePresence>
-									{isOpen && settingsCalendarEnabled && isCalendarMode && (
-										<motion.div
-											className="calendar-timer-content split-view"
-											onClick={(e) =>
-												e.stopPropagation()
-											} /* Block mode switches when clicking inside */
-											initial={{ opacity: 0 }}
-											animate={{ opacity: 1 }}
-											exit={{ opacity: 0, filter: "blur(4px)", transition: { duration: 0.1 } }}
-											transition={{ type: "spring", stiffness: 400, damping: 30 }}
-										>
-											<div className="calendar-column">
-												<Calendar mondayFirst={calendarMondayFirst} month={calendarMonth} onMonthChange={setCalendarMonth} />
-											</div>
 
-											<div className="timer-column">
-												<div className={`timer-section-new state-${timerState}`}>
-													<div className="timer-main">
-														<div className="timer-status">
-															{isEditingTimer
-																? "Type to set duration"
-																: isTimerFinished
-																	? "Time's up"
-																	: timerEndTime
-																		? `${timerState === "paused" ? "Paused · " : ""}ends ${timerEndTime}`
-																		: "Click to edit"}
-														</div>
-
-														<div className={`timer-clock-row ${isEditingTimer ? "editing" : ""}`}>
-															<div
-																className={`timer-clock ${isEditingTimer && !timerEditValid ? "invalid" : ""}`}
-																onClick={beginTimerEdit}
-																title={isTimerRunning ? undefined : "Click to set a duration"}
-															>
-																{minuteDigitItems.map(({ digit, key }) => (
-																	<RollDigit key={key} value={digit} compact={clockCompact} />
-																))}
-																<span className="timer-colon">:</span>
-																{secondDigitItems.map(({ digit, key }) => (
-																	<RollDigit key={key} value={digit} compact={clockCompact} />
-																))}
-															</div>
-															<span className="timer-edit-underline" aria-hidden="true" />
-															{isEditingTimer && (
-																<input
-																	ref={timerInputRef}
-																	className="timer-edit-input"
-																	type="text"
-																	inputMode="numeric"
-																	aria-label="Set timer duration as minutes and seconds, for example 1230 for 12 minutes 30 seconds"
-																	maxLength={5}
-																	aria-invalid={!timerEditValid}
-																	value={timerEditDigits}
-																	onChange={(e) =>
-																		setTimerEditDigits(
-																			e.target.value.replace(/\D/g, "").slice(0, 5)
-																		)
-																	}
-																	onKeyDown={(e) => {
-																		if (e.key === "Enter") commitTimerEdit(true);
-																		if (e.key === "Escape") {
-																			timerEditActiveRef.current = false;
-																			setIsEditingTimer(false);
-																		}
-																	}}
-																	onBlur={() => commitTimerEdit(false)}
-																	onWheel={(e) => e.stopPropagation()}
-																/>
-															)}
-														</div>
-													</div>
-
-													<div className="timer-controls-row">
-														<span className="timer-controls-spacer" aria-hidden="true" />
-														<button
-															onClick={handlePrimaryTimerAction}
-															onMouseDown={(e) => e.preventDefault()}
-															className="timer-btn-play"
-															title={primaryTimerLabel}
-														>
-															{isTimerRunning ? (
-																<Pause size={14} strokeWidth={2} fill="currentColor" />
-															) : (
-																<Play size={14} strokeWidth={2} fill="currentColor" />
-															)}
-															<span>{primaryTimerLabel}</span>
-														</button>
-														<button
-															onClick={resetTimer}
-															className="timer-btn-reset"
-															disabled={timerSeconds === 0 && !isTimerFinished}
-															title="Reset"
-														>
-															<RotateCcw size={14} strokeWidth={2.5} />
-														</button>
-													</div>
-
-													<div className="timer-preset-group">
-														{[5, 15, 25, 50].map((mins) => (
-															<button
-																key={mins}
-																onClick={() => startTimer(mins * 60)}
-																className={`timer-preset-segment ${lastDurationSeconds === mins * 60 && !isTimerFinished ? "active" : ""}`}
-															>
-																{mins}m
-															</button>
-														))}
-													</div>
-												</div>
-											</div>
-										</motion.div>
-									)}
-								</AnimatePresence>
 
 								{/* Shelf Panel */}
 								<AnimatePresence>
@@ -5311,6 +4685,23 @@ function App() {
 						</motion.button>
 					)}
 				</AnimatePresence>
+
+				{/* BLOQUE DERECHO: Estado, Batería y Reloj */}
+				<div
+					ref={rightPillRef}
+					className="caelestia-pill"
+					style={{
+						position: "absolute",
+						right: 12,
+						top: 6,
+						fontFamily: "monospace",
+						fontSize: 12,
+						gap: 10
+					}}
+				>
+					{batteryDetails && batteryDetails.percent !== null ? <span>{batteryDetails.percent}%</span> : null}
+					<span>{time}</span>
+				</div>
 			</div>
 		</div>
 	);

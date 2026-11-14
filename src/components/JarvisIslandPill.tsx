@@ -274,16 +274,19 @@ export function JarvisIslandPill() {
     );
   }
 
-  // 2. Micro-Animación de Estados en la Isla (Listening / Thinking / Executing / Error)
+  // 2. Micro-Animación de Estados en la Isla (Listening / Thinking / Speaking / Executing / Error)
+  const isSpeaking = state === "speaking" || (state === "action_started" && label.toLowerCase().includes("hablando"));
   const isListening = state === "listening";
   const isThinking = state === "thinking";
-  const isExecuting = state === "action_started";
+  const isExecuting = state === "action_started" && !isSpeaking;
   const isError = state === "error";
 
   const glowColor = isListening
     ? "#00e5ff"
     : isThinking
     ? "#c084fc"
+    : isSpeaking
+    ? "#10b981"
     : isExecuting
     ? "#f59e0b"
     : isError
@@ -295,6 +298,8 @@ export function JarvisIslandPill() {
       ? "Escuchando..."
       : isThinking
       ? "Pensando..."
+      : isSpeaking
+      ? "Hablando..."
       : isExecuting
       ? "Ejecutando..."
       : isError
@@ -363,8 +368,8 @@ export function JarvisIslandPill() {
         title={`JARVIS: ${statusText}`}
       >
         {/* Indicador visual animado según el estado */}
-        {isListening ? (
-          // Ecualizador de 3 barras para voz
+        {isListening || isSpeaking ? (
+          // Ecualizador de 3 barras para voz (escucha o habla)
           <div style={{ display: "inline-flex", alignItems: "center", gap: "2px", height: "12px" }}>
             <span
               style={{

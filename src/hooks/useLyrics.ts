@@ -12,20 +12,76 @@ export interface ParsedTrack {
 
 /**
  * Checks if the media is likely a standard video (podcast, gameplay, tutorial, news, etc.)
- * rather than a song, so we don't display music lyric prompts on regular videos.
+ * or web content (Instagram reels, TikTok, Shorts, Twitter, browser tabs)
+ * rather than a song, so we don't display music lyric prompts or search LRCLIB for fake lyrics.
  */
 export function isLikelyNonMusicVideo(
 	rawTitle: string,
 	rawArtist: string,
 	durationMs?: number
 ): boolean {
+	if (!rawTitle) return true;
+
 	// Videos longer than 20 minutes (1,200,000 ms) are almost never standalone songs
 	if (durationMs && durationMs > 1200000) {
 		return true;
 	}
 
-	const combined = `${rawTitle || ""} ${rawArtist || ""}`.toLowerCase();
+	const titleTrimmed = rawTitle.trim();
+	const titleLower = titleTrimmed.toLowerCase();
+	const artistLower = (rawArtist || "").trim().toLowerCase();
+	const combined = `${titleLower} ${artistLower}`;
+
+	// Exact or standalone web / browser / social media titles
+	const bannedStandalone = [
+		"instagram",
+		"reels",
+		"reel",
+		"tiktok",
+		"youtube shorts",
+		"shorts",
+		"facebook",
+		"twitter",
+		"x.com",
+		"reddit",
+		"twitch",
+		"brave",
+		"chrome",
+		"msedge",
+		"edge",
+		"firefox",
+		"opera",
+		"netflix",
+		"crunchyroll",
+		"new tab",
+		"bloom media"
+	];
+
+	if (bannedStandalone.includes(titleLower)) {
+		return true;
+	}
+
+	// Starts with or contains prominent social media / video platform indicators
+	if (
+		/^instagram(\.com)?\b/i.test(titleLower) ||
+		/^reels?\b/i.test(titleLower) ||
+		/^tiktok\b/i.test(titleLower) ||
+		/^youtube shorts\b/i.test(titleLower) ||
+		/\b(instagram reel|tiktok video|youtube short)\b/i.test(titleLower)
+	) {
+		return true;
+	}
+
+	// Browser / web URLs in title
+	if (/https?:\/\/|\.com\/|\.org\/|\.net\/|www\./i.test(titleLower)) {
+		return true;
+	}
+
 	const nonMusicPatterns = [
+		/\binstagram\b/i,
+		/\breels?\b/i,
+		/\btiktok\b/i,
+		/\bshorts\b/i,
 		/\btutorial(?:es)?\b/i,
 		/\bgameplay(?:s)?\b/i,
 		/\bwalkthrough\b/i,
@@ -142,11 +198,30 @@ export function parseTrackAndArtist(rawTitle: string, rawArtist: string): Parsed
 		candidates.push({ trackName: pureTrack, artistName: "" });
 	}
 
-	// Deduplicate candidates
+	// Deduplicate candidates and reject non-music / web candidates
 	const seen = new Set<string>();
+	const bannedKeywords = new Set([
+		"instagram",
+		"reels",
+		"reel",
+		"tiktok",
+		"shorts",
+		"brave",
+		"chrome",
+		"edge",
+		"msedge",
+		"firefox",
+		"opera",
+		"bloom media"
+	]);
+
 	return candidates.filter((c) => {
-		const k = `${c.trackName.toLowerCase()}|||${c.artistName.toLowerCase()}`;
-		if (!c.trackName || seen.has(k)) return false;
+		const trackLower = c.trackName.toLowerCase().trim();
+		if (!trackLower || bannedKeywords.has(trackLower)) return false;
+		if (isLikelyNonMusicVideo(c.trackName, c.artistName)) return false;
+
+		const k = `${trackLower}|||${c.artistName.toLowerCase().trim()}`;
+		if (seen.has(k)) return false;
 		seen.add(k);
 		return true;
 	});
@@ -332,23 +407,57 @@ export function useLyrics(
 						);
 						if (searchRes.ok) {
 							const items: any[] = await searchRes.json();
-							const match = items?.find((i) => i.syncedLyrics) || items?.find((i) => i.plainLyrics);
-							if (match && !isCancelled) {
-								const parsed = match.syncedLyrics
-									? parseLrc(match.syncedLyrics)
-									: parsePlainLyrics(match.plainLyrics);
-								if (parsed.length > 0) {
-									setCachedLyrics(cacheKey, parsed);
-									setLyrics(parsed);
-									setIsLoading(false);
-									return;
+							if (Array.isArray(items)) {
+								// Find item that actually matches the candidate artist
+								const targetArtist = (cand.artistName || "").toLowerCase().trim();
+								const targetTrack = cand.trackName.toLowerCase().trim();
+								const match = items.find((item) => {
+									if (!item.syncedLyrics && !item.plainLyrics) return false;
+									const itemArtist = (item.artistName || "").toLowerCase().trim();
+									const itemTrack = (item.trackName || "").toLowerCase().trim();
+
+									// If candidate specified an artist, strictly ensure artist matches or contains words
+									if (targetArtist) {
+										const artistMatch =
+											itemArtist.includes(targetArtist) ||
+											targetArtist.includes(itemArtist) ||
+											itemArtist.split(/\s+/).some((w: string) => w.length > 2 && targetArtist.includes(w));
+										if (!artistMatch) return false;
+									}
+
+									// Ensure track title has high similarity
+									const trackMatch =
+										itemTrack.includes(targetTrack) ||
+										targetTrack.includes(itemTrack) ||
+										itemTrack.split(/\s+/).some((w: string) => w.length > 2 && targetTrack.includes(w));
+									if (!trackMatch) return false;
+
+									// Optional duration validation (within 15 seconds) if available
+									if (durationMs && item.duration) {
+										const diff = Math.abs(item.duration * 1000 - durationMs);
+										if (diff > 15000) return false;
+									}
+
+									return true;
+								});
+
+								if (match && !isCancelled) {
+									const parsed = match.syncedLyrics
+										? parseLrc(match.syncedLyrics)
+										: parsePlainLyrics(match.plainLyrics);
+									if (parsed.length > 0) {
+										setCachedLyrics(cacheKey, parsed);
+										setLyrics(parsed);
+										setIsLoading(false);
+										return;
+									}
 								}
 							}
 						}
 					} catch {}
 				}
 
-				// 3. Fallback: search by track_name only
+				// 3. Fallback: search by track_name only, BUT STILL REQUIRE ARTIST MATCH if artist was provided
 				for (const cand of searchCandidates) {
 					if (!cand.trackName) continue;
 					try {
@@ -358,18 +467,45 @@ export function useLyrics(
 						);
 						if (fallbackRes.ok) {
 							const fallbackItems: any[] = await fallbackRes.json();
-							const match =
-								fallbackItems?.find((i) => i.syncedLyrics) ||
-								fallbackItems?.find((i) => i.plainLyrics);
-							if (match && !isCancelled) {
-								const parsed = match.syncedLyrics
-									? parseLrc(match.syncedLyrics)
-									: parsePlainLyrics(match.plainLyrics);
-								if (parsed.length > 0) {
-									setCachedLyrics(cacheKey, parsed);
-									setLyrics(parsed);
-									setIsLoading(false);
-									return;
+							if (Array.isArray(fallbackItems)) {
+								const targetArtist = (cand.artistName || "").toLowerCase().trim();
+								const targetTrack = cand.trackName.toLowerCase().trim();
+								const match = fallbackItems.find((item) => {
+									if (!item.syncedLyrics && !item.plainLyrics) return false;
+									const itemArtist = (item.artistName || "").toLowerCase().trim();
+									const itemTrack = (item.trackName || "").toLowerCase().trim();
+
+									// If artist was provided, do NOT accept random artists!
+									if (targetArtist) {
+										const artistMatch =
+											itemArtist.includes(targetArtist) ||
+											targetArtist.includes(itemArtist) ||
+											itemArtist.split(/\s+/).some((w: string) => w.length > 2 && targetArtist.includes(w));
+										if (!artistMatch) return false;
+									} else {
+										// If no artist was provided, track name must match exactly
+										if (itemTrack !== targetTrack) return false;
+									}
+
+									// Duration check if available
+									if (durationMs && item.duration) {
+										const diff = Math.abs(item.duration * 1000 - durationMs);
+										if (diff > 15000) return false;
+									}
+
+									return true;
+								});
+
+								if (match && !isCancelled) {
+									const parsed = match.syncedLyrics
+										? parseLrc(match.syncedLyrics)
+										: parsePlainLyrics(match.plainLyrics);
+									if (parsed.length > 0) {
+										setCachedLyrics(cacheKey, parsed);
+										setLyrics(parsed);
+										setIsLoading(false);
+										return;
+									}
 								}
 							}
 						}

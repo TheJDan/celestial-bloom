@@ -8,6 +8,9 @@ import { initTheme } from "./theme";
 import { useSettingsSync } from "./hooks/useSettingsSync";
 import { reloadIfMirrorWasStale } from "./hooks/settingsMirror";
 import { dockOverlapSpan } from "./dockGeometry";
+import { initCaelestiaBridge } from "./caelestiaBridge";
+
+initCaelestiaBridge();
 
 import {
 	dockIconKey,
@@ -125,13 +128,8 @@ function TaskViewIcon() {
 	);
 }
 
-function resolveStartIcon(startIcon: string): string {
-	if (startIcon === "bloom-colorful") return "/bloom-colorful.png";
-	if (startIcon === "bloom-golden") return "/bloom-golden.png";
-	if (startIcon === "bloom-biscuit") return "/bloom-biscuit.png";
-	if (startIcon === "windows") return "/windows-11.png";
-	if (startIcon.startsWith("custom:")) return startIcon.slice("custom:".length);
-	return "/bloom.png";
+function resolveStartIcon(_startIcon: string): string {
+	return "/icons/linux.svg";
 }
 
 // Stable module-level constants so object references never change between renders,
@@ -706,21 +704,9 @@ const Dock = memo(function Dock() {
 	const handleAppClick = async (app: AppInfo) => {
 		try {
 			if (app.path === "start") {
-				await invoke("open_app", { appName: "start" });
-			} else if (app.is_background && app.tray_ids?.length === 1) {
-				try {
-					await invoke("activate_tray_icon", { trayId: app.tray_ids[0] });
-				} catch (trayErr) {
-					console.warn(`activate_tray_icon failed for ${app.name}, falling back to open_app:`, trayErr);
-					await invoke("open_app", { appName: app.path });
-				}
-			} else if (app.all_hwnds && app.all_hwnds.length > 1) {
-				// Several windows: bring the most recent forward, then cycle.
-				await invoke("focus_app_windows", { hwnds: app.all_hwnds.map(([hwnd]) => hwnd) });
-			} else if (app.hwnd) {
-				await invoke("focus_window", { hwnd: app.hwnd });
+				await invoke("toggle_spotlight");
 			} else {
-				await invoke("open_app", { appName: app.path });
+				await invoke("open_app", { appName: app.path, path: app.path, executable: app.executable });
 			}
 		} catch (e) {
 			console.error(`Failed to interact with ${app.name}:`, e);

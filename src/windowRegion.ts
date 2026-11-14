@@ -99,7 +99,7 @@ export function measureElements(selectors: [string, number][]): RegionRect[] {
  * expires or the display scale changes. Rectangles are clipped to the window
  * first. Meant to live as long as its window.
  */
-export function createRegionSender(send: (rects: RegionRect[]) => void, holdMs = 700) {
+export function createRegionSender(send: (rects: RegionRect[]) => void, holdMs = 250) {
 	let state: RegionState = { key: "", current: [], held: [] };
 	let latest: RegionRect[] = [];
 	let timer: ReturnType<typeof setTimeout> | null = null;

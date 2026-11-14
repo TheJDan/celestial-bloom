@@ -72,17 +72,17 @@ export function AboutTab({
 		<div className="about-tab-container">
 			<div className="about-header">
 				<img src="/bloom.png" className="about-logo" alt="Bloom Logo" draggable={false} />
-				<h1 className="about-title">Bloom</h1>
+				<h1 className="about-title">Celestial Bloom</h1>
 				<p className="about-version">Version {appVersion}</p>
 				<p className="about-credit">
-					Made with <span className="about-heart">❤️</span> by{" "}
+					Developed with <span className="about-heart">❤️</span> by{" "}
 					<button
 						className="about-author"
-						onClick={() => openUrl("https://github.com/SehajveerSingh2005")}
-						title="sehaz on GitHub"
+						onClick={() => openUrl("https://github.com/TheJDan/celestial-bloom")}
+						title="TheJDan on GitHub"
 					>
 						<GithubIcon size={12} />
-						<span>sehaz</span>
+						<span>TheJDan</span>
 					</button>
 				</p>
 			</div>

@@ -27,6 +27,7 @@ import {
 	Sun,
 	RotateCcw
 } from "lucide-react";
+import { WavySlider } from "./WavySlider";
 import "./CaelestiaTabs.css";
 
 interface MediaInfo {
@@ -334,28 +335,22 @@ export function CaelestiaDashboard({
 							</div>
 						</div>
 
-						{/* Wavy Slider */}
-						<div className="chome-wavy-container">
-							<svg className="chome-wavy-svg" viewBox="0 0 280 18" preserveAspectRatio="none">
-								<path
-									className="chome-wavy-bg"
-									d="M 0 9 Q 10 3, 20 9 T 40 9 T 60 9 T 80 9 T 100 9 T 120 9 T 140 9 T 160 9 T 180 9 T 200 9 T 220 9 T 240 9 T 260 9 T 280 9"
-								/>
-								<path
-									className="chome-wavy-fill"
-									d="M 0 9 Q 10 3, 20 9 T 40 9 T 60 9 T 80 9 T 100 9 T 120 9 T 140 9 T 160 9 T 180 9 T 200 9 T 220 9 T 240 9 T 260 9 T 280 9"
-									style={{
-										strokeDasharray: 280,
-										strokeDashoffset: 280 - 280 * progressRatio
-									}}
-								/>
-							</svg>
-							{/* Indicator Knob */}
-							<div
-								className="chome-wavy-knob"
-								style={{ left: `${Math.round(progressRatio * 100)}%` }}
-							/>
-						</div>
+						{/* Animated Wavy Slider (Fluid 60fps Caelestia Wave) */}
+						<WavySlider
+							value={progressRatio}
+							playing={isPlaying}
+							fillColor="#ffffff"
+							trackColor="rgba(255, 255, 255, 0.15)"
+							handleColor="#ffffff"
+							height={22}
+							onChange={(v) => {
+								if (durMs > 0) {
+									const seekMs = Math.round(v * durMs);
+									setDisplayPos(seekMs);
+									invoke("media_seek", { positionMs: seekMs }).catch(() => {});
+								}
+							}}
+						/>
 
 						<div className="chome-music-times">
 							<span>{formatTime(displayPos)}</span>

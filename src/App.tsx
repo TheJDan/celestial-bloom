@@ -18,6 +18,7 @@ import {
 	HeadphonesIcon
 } from "./icons";
 import { CompactMediaPlayer } from "./CompactMediaPlayer";
+import { CaelestiaMusicPlayer } from "./components/CaelestiaMusicPlayer";
 import { connectGlazeWM, syncMaterialColors, type WorkspaceState } from "./services/caelestiaBridge";
 interface ActiveHeadphonesInfo {
 	id: string;
@@ -3462,7 +3463,7 @@ function App() {
 		if (bloomMode === "shelf") return shelfViewMode === "deskbox" || shelfItems.length === 0 ? 410 : 380;
 		if (isOpen) {
 			if (bloomMode === "optimizer") return 680;
-			if (bloomMode === "music" || isMusicMode) return 680;
+			if (bloomMode === "music" || isMusicMode) return 860;
 			if (isCalendarMode) return 680;
 			if (bloomMode === "command-center") return 860;
 			if (bloomMode === "wifi" || bloomMode === "bluetooth" || bloomMode === "system-tray" || bloomMode === "audio-output") return 420;
@@ -3763,7 +3764,7 @@ function App() {
 								}}
 							>
 								{/* Caelestia Tab Header when expanded into secondary tool views */}
-								{isOpen && bloomMode !== "announcement" && bloomMode !== "device" && bloomMode !== "command-center" && (
+								{isOpen && bloomMode !== "announcement" && bloomMode !== "device" && bloomMode !== "command-center" && bloomMode !== "music" && (
 									<motion.div
 										key="caelestia-tabs-nav"
 										className="caelestia-tabs-nav"
@@ -3790,7 +3791,7 @@ function App() {
 										</button>
 										<button
 											type="button"
-											className={`caelestia-tab ${bloomMode === "music" ? "active" : ""}`}
+											className={`caelestia-tab ${(bloomMode as string) === "music" ? "active" : ""}`}
 											onClick={() => setBloomMode("music")}
 										>
 											<Music size={12} strokeWidth={2.2} />
@@ -3889,33 +3890,18 @@ function App() {
 												animate={{ opacity: 1, scale: 1 }}
 												exit={{ opacity: 0, scale: 0.98, transition: { duration: 0.1 } }}
 												transition={{ type: "spring", stiffness: 500, damping: 30 }}
+												style={{ width: "100%", height: "100%" }}
 											>
-												<CompactMediaPlayer
+												<CaelestiaMusicPlayer
 													mediaInfo={mediaInfo}
 													albumArtUrl={albumArtUrl}
-													albumArtKey={albumArtKey}
 													isPlaying={isPlaying}
 													volume={displayVolume}
-													volumeExpanded={compactVolumeExpanded}
-													onVolumeExpandedChange={setCompactVolumeExpanded}
-													lyricsExpanded={lyricsExpanded}
-													onLyricsExpandedChange={(expanded) => {
-														setLyricsExpanded(expanded);
-														localStorage.setItem("bloom-lyrics-expanded", String(expanded));
-													}}
-													onTogglePlayPause={togglePlayPause}
 													onVolumeChange={handleVolumeChange}
-													prevFront={prevFront}
-													prevBack={prevBack}
-													nextFront={nextFront}
-													nextBack={nextBack}
-													onAnimatePrev={animatePrev}
-													onAnimateNext={animateNext}
-													onLayoutChange={(layout) => {
-														setMediaLayout(layout);
-													}}
-													onAudioOutputClick={() => setBloomMode("audio-output")}
-													isCaelestia={true}
+													onTogglePlayPause={togglePlayPause}
+													onPrev={animatePrev}
+													onNext={animateNext}
+													onSwitchTab={(t) => setBloomMode(t as any)}
 												/>
 											</motion.div>
 										) : (

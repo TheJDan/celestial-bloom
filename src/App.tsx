@@ -3464,7 +3464,7 @@ function App() {
 			if (bloomMode === "optimizer") return 680;
 			if (bloomMode === "music" || isMusicMode) return 680;
 			if (isCalendarMode) return 680;
-			if (bloomMode === "command-center") return 460;
+			if (bloomMode === "command-center") return 860;
 			if (bloomMode === "wifi" || bloomMode === "bluetooth" || bloomMode === "system-tray" || bloomMode === "audio-output") return 420;
 			if (bloomMode === "devices") return 350;
 		}
@@ -3678,10 +3678,10 @@ function App() {
 						opacity: isVisible ? 1 : 0,
 						scaleX: 1,
 						scaleY: 1,
-						borderTopLeftRadius: isImpacted ? 0 : 18,
-						borderTopRightRadius: isImpacted ? 0 : 18,
-						borderBottomLeftRadius: isCalendarMode ? 28 : 18,
-						borderBottomRightRadius: isCalendarMode ? 28 : 18,
+						borderTopLeftRadius: isImpacted ? 0 : isOpen ? 30 : 18,
+						borderTopRightRadius: isImpacted ? 0 : isOpen ? 30 : 18,
+						borderBottomLeftRadius: isOpen ? 30 : isCalendarMode ? 28 : 18,
+						borderBottomRightRadius: isOpen ? 30 : isCalendarMode ? 28 : 18,
 						filter: isVisible ? "blur(0px)" : "blur(8px)",
 						pointerEvents: isVisible ? "auto" : "none"
 					}}
@@ -3762,8 +3762,8 @@ function App() {
 									overflow: "hidden"
 								}}
 							>
-								{/* Caelestia Tab Header when expanded */}
-								{isOpen && bloomMode !== "announcement" && bloomMode !== "device" && (
+								{/* Caelestia Tab Header when expanded into secondary tool views */}
+								{isOpen && bloomMode !== "announcement" && bloomMode !== "device" && bloomMode !== "command-center" && (
 									<motion.div
 										key="caelestia-tabs-nav"
 										className="caelestia-tabs-nav"
@@ -3774,7 +3774,7 @@ function App() {
 									>
 										<button
 											type="button"
-											className={`caelestia-tab ${bloomMode === "command-center" ? "active" : ""}`}
+											className={`caelestia-tab ${(bloomMode as string) === "command-center" ? "active" : ""}`}
 											onClick={() => setBloomMode("command-center")}
 										>
 											<LayoutGrid size={12} strokeWidth={2.2} />
@@ -3835,6 +3835,7 @@ function App() {
 													onTogglePlayPause={togglePlayPause}
 													onNext={animateNext}
 													onPrev={animatePrev}
+													onSwitchTab={(t) => setBloomMode(t as any)}
 												/>
 											</motion.div>
 										) : bloomMode === "devices" || bloomMode === "wifi" || bloomMode === "bluetooth" || bloomMode === "system-tray" || bloomMode === "audio-output" ? (
@@ -3934,6 +3935,7 @@ function App() {
 													onTogglePlayPause={togglePlayPause}
 													onNext={animateNext}
 													onPrev={animatePrev}
+													onSwitchTab={(t) => setBloomMode(t as any)}
 												/>
 											</motion.div>
 										)

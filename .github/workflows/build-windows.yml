@@ -1,12 +1,15 @@
-name: Build Windows App
+name: Build and Release Windows App
 
 on:
   push:
     branches: [main]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
-  build:
+  release:
     runs-on: windows-latest
     steps:
       - name: Checkout repository
@@ -31,8 +34,11 @@ jobs:
         env:
           CI: true
 
-      - name: Upload Windows Binary
-        uses: actions/upload-artifact@v4
+      - name: Publish Public Release
+        uses: softprops/action-gh-release@v2
         with:
-          name: celestial-bloom-exe
-          path: src-tauri/target/release/*.exe
+          tag_name: v${{ github.run_number }}
+          name: "Celestial Bloom (Build #${{ github.run_number }})"
+          body: "Ejecutable directo de Celestial Bloom para Windows 10/11. Descarga bloom.exe y ábrelo con doble clic."
+          files: src-tauri/target/release/bloom.exe
+          make_latest: true

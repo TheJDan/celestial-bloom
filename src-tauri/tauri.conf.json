@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "bloom",
-  "version": "3.10.1",
-  "identifier": "com.sehaz.bloom",
+  "productName": "Celestial Bloom",
+  "version": "1.0.0",
+  "identifier": "com.thejdan.celestialbloom",
   "build": {
     "beforeBuildCommand": "bun run build",
     "frontendDist": "../dist"
@@ -103,11 +103,11 @@
     "active": true,
     "createUpdaterArtifacts": true,
     "targets": "all",
-    "publisher": "Sehajveer Singh",
-    "copyright": "Copyright © 2026 Sehajveer Singh",
+    "publisher": "TheJDan",
+    "copyright": "Copyright © 2026 TheJDan",
     "category": "Utility",
-    "shortDescription": "A notch and dock for Windows",
-    "longDescription": "Bloom replaces the Windows taskbar with a dock and adds a notch for media, quick controls and status.",
+    "shortDescription": "Caelestia Dynamic Island & Shell for Windows",
+    "longDescription": "Celestial Bloom brings the fluid Caelestia desktop experience to Windows 10/11 with native widgets, workspaces and dynamic theming.",
     "windows": {
       "webviewInstallMode": {
         "type": "embedBootstrapper"

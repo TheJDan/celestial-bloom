@@ -39,6 +39,6 @@ jobs:
         with:
           tag_name: v${{ github.run_number }}
           name: "Celestial Bloom (Build #${{ github.run_number }})"
-          body: "Ejecutable directo de Celestial Bloom para Windows 10/11. Descarga bloom.exe y ábrelo con doble clic."
-          files: src-tauri/target/release/bloom.exe
+          body: "Ejecutable directo de Celestial Bloom para Windows 10/11. Descárgalo y ábrelo con doble clic."
+          files: src-tauri/target/release/*.exe
           make_latest: true

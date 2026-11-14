@@ -1,8 +1,8 @@
 [package]
-name = "bloom"
-version = "3.10.1"
-description = ""
-authors = ["sehaz"]
+name = "celestial-bloom"
+version = "1.0.0"
+description = "Caelestia Dynamic Island & Shell for Windows 10/11"
+authors = ["TheJDan"]
 edition = "2021"
 license = "GPL-3.0-only"
 

@@ -5777,15 +5777,17 @@ pub fn lock_windows_workstation() {
 #[tauri::command]
 pub fn trigger_screenshot() {
     unsafe {
-        use windows::Win32::UI::WindowsAndMessaging::{keybd_event, KEYEVENTF_KEYUP};
-        use windows::Win32::UI::Input::KeyboardAndMouse::{VK_LWIN, VK_SHIFT};
-        const VK_S: u8 = 0x53;
-        keybd_event(VK_LWIN.0 as u8, 0, Default::default(), 0);
-        keybd_event(VK_SHIFT.0 as u8, 0, Default::default(), 0);
-        keybd_event(VK_S, 0, Default::default(), 0);
-        keybd_event(VK_S, 0, KEYEVENTF_KEYUP, 0);
-        keybd_event(VK_SHIFT.0 as u8, 0, KEYEVENTF_KEYUP, 0);
-        keybd_event(VK_LWIN.0 as u8, 0, KEYEVENTF_KEYUP, 0);
+        use windows::core::{HSTRING, PCWSTR};
+        use windows::Win32::UI::Shell::ShellExecuteW;
+        use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+        let _ = ShellExecuteW(
+            None,
+            &HSTRING::from("open"),
+            &HSTRING::from("ms-screenclip:"),
+            PCWSTR::null(),
+            PCWSTR::null(),
+            SW_SHOWNORMAL,
+        );
     }
 }
 

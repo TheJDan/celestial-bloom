@@ -33,12 +33,20 @@ jobs:
         run: bun run tauri build --no-bundle
         env:
           CI: true
+          CELESTIAL_BUILD_NUMBER: ${{ github.run_number }}
+
+      - name: Ensure standard executable name
+        shell: bash
+        run: |
+          cp src-tauri/target/release/bloom.exe src-tauri/target/release/celestial-bloom.exe 2>/dev/null || true
 
       - name: Publish Public Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ github.run_number }}
           name: "Celestial Bloom (Build #${{ github.run_number }})"
-          body: "Ejecutable directo de Celestial Bloom para Windows 10/11. Descárgalo y ábrelo con doble clic."
-          files: src-tauri/target/release/*.exe
+          body: "Ejecutable directo de Celestial Bloom para Windows 10/11 con actualizador automático integrado."
+          files: |
+            src-tauri/target/release/celestial-bloom.exe
+            src-tauri/target/release/bloom.exe
           make_latest: true

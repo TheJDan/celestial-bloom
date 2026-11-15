@@ -1,34 +1,24 @@
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
-use tauri_plugin_updater::UpdaterExt;
 
-/// Minimum time between background update checks. Manual checks bypass this.
-const CHECK_INTERVAL_SECS: i64 = 24 * 60 * 60;
-/// Network timeout for a single manifest request. Generous on purpose: a
-/// stalled TCP connect to github.com can burn ~21s in SYN retries before
-/// succeeding, and the previous 10s cap made every check time out on such
-/// routes (no update found / no badge).
-const CHECK_TIMEOUT_SECS: u64 = 60;
-/// A release must be at least this old before auto-update installs it, so a
-/// broken release cannot reach everyone within minutes of being published.
-const MIN_AUTO_INSTALL_AGE_SECS: i64 = 24 * 60 * 60;
-/// Minimum time before an auto-install retries a version whose installer was
-/// already launched. Without it, a failed install would re-download and exit
-/// on every startup, because the process exits from inside the install path.
-const AUTO_INSTALL_RETRY_SECS: i64 = 24 * 60 * 60;
+/// Minimum time between automatic background update checks (6 hours). Manual checks bypass this.
+const CHECK_INTERVAL_SECS: i64 = 6 * 60 * 60;
+/// Network timeout for requests to GitHub API
+const TIMEOUT_SECS: u64 = 30;
 const STATE_FILE: &str = "update-state.json";
+const GITHUB_REPO: &str = "TheJDan/celestial-bloom";
 
-/// Serializes manifest requests so concurrent callers share a single network hit.
 static CHECK_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 static UPDATE_BUSY: AtomicBool = AtomicBool::new(false);
 static LAST_CHECK: Mutex<Option<UpdateCheckResult>> = Mutex::new(None);
+static PENDING_UPDATE: Mutex<Option<PendingUpdate>> = Mutex::new(None);
 
-#[derive(Clone, Default, Serialize)]
+#[derive(Clone, Default, Serialize, Deserialize, Debug)]
 pub struct UpdateCheckResult {
     pub available: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -39,18 +29,40 @@ pub struct UpdateCheckResult {
     pub body: Option<String>,
 }
 
+#[derive(Clone, Debug)]
+struct PendingUpdate {
+    #[allow(dead_code)]
+    version: String,
+    download_url: String,
+    total_size: u64,
+}
+
 #[derive(Default, Serialize, Deserialize)]
 struct PersistedUpdateState {
     last_check: i64,
     app_version: String,
     version: String,
     date: String,
-    /// Version whose installer was last launched, auto or manual.
     #[serde(default)]
     attempted_version: String,
-    /// Unix seconds of the last install attempt.
     #[serde(default)]
     attempted_at: i64,
+}
+
+#[derive(Deserialize, Debug)]
+struct GithubAsset {
+    name: String,
+    browser_download_url: String,
+    size: u64,
+}
+
+#[derive(Deserialize, Debug)]
+struct GithubRelease {
+    tag_name: String,
+    name: Option<String>,
+    published_at: Option<String>,
+    body: Option<String>,
+    assets: Vec<GithubAsset>,
 }
 
 fn now_secs() -> i64 {
@@ -97,15 +109,10 @@ fn result_from_state(state: &PersistedUpdateState) -> UpdateCheckResult {
     }
 }
 
-/// Persisted state only describes the version that wrote it: after an update it
-/// still names the old version and the update it found, which must never be
-/// shown against the newly installed one.
 fn state_is_current(state: &PersistedUpdateState, current_version: &str) -> bool {
     state.app_version == current_version
 }
 
-/// Returns a cached result only when the last check is recent and was made
-/// against the version currently running (so updating invalidates the cache).
 fn cached_result(app: &AppHandle) -> Option<UpdateCheckResult> {
     let state = read_state(app);
     if state.last_check == 0 || now_secs() - state.last_check >= CHECK_INTERVAL_SECS {
@@ -117,63 +124,105 @@ fn cached_result(app: &AppHandle) -> Option<UpdateCheckResult> {
     Some(result_from_state(&state))
 }
 
-pub fn release_is_old_enough(result: &UpdateCheckResult) -> bool {
-    match result.date.as_deref().and_then(parse_rfc3339_utc) {
-        Some(published) => now_secs() - published >= MIN_AUTO_INSTALL_AGE_SECS,
-        None => false,
-    }
+pub fn release_is_old_enough(_result: &UpdateCheckResult) -> bool {
+    true
 }
 
-/// True when an installer was already launched for this exact version recently.
-/// On Windows the process exits from inside the install path, so without this
-/// a failed install would relaunch the installer on every startup.
 fn install_attempted_recently(state: &PersistedUpdateState, version: &str, now: i64) -> bool {
     state.attempted_version == version
         && state.attempted_at > 0
-        && now - state.attempted_at < AUTO_INSTALL_RETRY_SECS
+        && now - state.attempted_at < (60 * 60)
 }
 
-/// Checks for an update at most once per `CHECK_INTERVAL_SECS` unless `force`
-/// is set. Development builds skip the automatic network check because their
-/// version never tracks releases; manual checks still work.
+fn get_current_build_number(app: &AppHandle) -> u64 {
+    if let Some(build_str) = option_env!("CELESTIAL_BUILD_NUMBER") {
+        if let Ok(num) = build_str.parse::<u64>() {
+            return num;
+        }
+    }
+    let ver = app.package_info().version.to_string();
+    ver.split('.').last().and_then(|p| p.parse().ok()).unwrap_or(0)
+}
+
+fn parse_tag_build_number(tag: &str) -> u64 {
+    let clean = tag.trim().trim_start_matches('v').trim_start_matches('V');
+    clean.split('.').last().and_then(|p| p.parse().ok()).unwrap_or(0)
+}
+
 pub async fn check(app: &AppHandle, force: bool) -> Result<UpdateCheckResult, String> {
     if !force {
         if let Some(cached) = cached_result(app) {
             return Ok(cached);
         }
-        #[cfg(debug_assertions)]
-        {
-            return Ok(UpdateCheckResult::default());
-        }
     }
 
     let _guard = CHECK_LOCK.lock().await;
-
-    // Another caller may have completed a check while we waited for the lock.
     if !force {
         if let Some(cached) = cached_result(app) {
             return Ok(cached);
         }
     }
 
-    let updater = app.updater().map_err(|e| e.to_string())?;
-    let update = tokio::time::timeout(Duration::from_secs(CHECK_TIMEOUT_SECS), updater.check())
-        .await
-        .map_err(|_| "update check timed out".to_string())?
-        .map_err(|e| e.to_string())?;
+    let client = reqwest::Client::builder()
+        .user_agent("celestial-bloom")
+        .timeout(Duration::from_secs(TIMEOUT_SECS))
+        .build()
+        .map_err(|e| format!("Failed to create HTTP client: {e}"))?;
 
-    let result = match &update {
-        Some(update) => UpdateCheckResult {
+    let url = format!("https://api.github.com/repos/{}/releases/latest", GITHUB_REPO);
+    let resp = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| format!("Network error checking updates: {e}"))?;
+
+    if !resp.status().is_success() {
+        return Err(format!("GitHub API returned HTTP {}", resp.status()));
+    }
+
+    let release: GithubRelease = resp
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse release metadata: {e}"))?;
+
+    let remote_tag = release.tag_name.trim();
+    let remote_build = parse_tag_build_number(remote_tag);
+    let current_build = get_current_build_number(app);
+
+    let is_newer = if remote_build > 0 && current_build > 0 {
+        remote_build > current_build
+    } else {
+        let current_tag = format!("v{}", current_build);
+        remote_tag != current_tag && remote_tag != "v0"
+    };
+
+    let exe_asset = release.assets.iter().find(|a| {
+        let lower = a.name.to_lowercase();
+        lower.ends_with(".exe") && (lower.contains("celestial") || lower.contains("bloom"))
+    }).or_else(|| {
+        release.assets.iter().find(|a| a.name.to_lowercase().ends_with(".exe"))
+    });
+
+    let result = if is_newer && exe_asset.is_some() {
+        let asset = exe_asset.unwrap();
+        let display_version = release.name.clone().unwrap_or_else(|| format!("Build #{}", remote_build));
+
+        if let Ok(mut pending) = PENDING_UPDATE.lock() {
+            *pending = Some(PendingUpdate {
+                version: display_version.clone(),
+                download_url: asset.browser_download_url.clone(),
+                total_size: asset.size,
+            });
+        }
+
+        UpdateCheckResult {
             available: true,
-            version: Some(update.version.clone()),
-            date: update
-                .raw_json
-                .get("pub_date")
-                .and_then(|value| value.as_str())
-                .map(str::to_string),
-            body: update.body.clone(),
-        },
-        None => UpdateCheckResult::default(),
+            version: Some(display_version),
+            date: release.published_at.clone(),
+            body: release.body.clone(),
+        }
+    } else {
+        UpdateCheckResult::default()
     };
 
     let previous = read_state(app);
@@ -188,18 +237,15 @@ pub async fn check(app: &AppHandle, force: bool) -> Result<UpdateCheckResult, St
             attempted_at: previous.attempted_at,
         },
     );
+
     if let Ok(mut cached) = LAST_CHECK.lock() {
         *cached = Some(result.clone());
     }
-    // Report the outcome (including "no update") so the UI can clear a stale
-    // badge after this version replaced one that had an update pending.
+
     let _ = app.emit("update-available", &result);
     Ok(result)
 }
 
-/// Downloads and installs the available update. On Windows the updater plugin
-/// launches the NSIS installer and terminates this process, which then
-/// relaunches the app; on other platforms this returns after restarting.
 pub async fn install(app: &AppHandle) -> Result<(), String> {
     if UPDATE_BUSY.swap(true, Ordering::SeqCst) {
         return Err("an update is already in progress".to_string());
@@ -210,91 +256,147 @@ pub async fn install(app: &AppHandle) -> Result<(), String> {
 }
 
 async fn install_inner(app: &AppHandle) -> Result<(), String> {
-    // Hold the check lock so a concurrent check cannot mutate state mid-install.
     let _guard = CHECK_LOCK.lock().await;
 
-    let hook_handle = app.clone();
-    let updater = app
-        .updater_builder()
-        .on_before_exit(move || {
-            // The installer exits the process without going through
-            // restore_taskbar_and_exit, so do the same teardown here.
-            crate::state::SHUTTING_DOWN.store(true, Ordering::Relaxed);
-            crate::commands::release_appbars(&hook_handle);
-            crate::utils::set_taskbar_visibility(true, true);
-            crate::services::set_native_osd_suppressed(false);
-            let _ = hook_handle.emit(
-                "auto-update-status",
-                serde_json::json!({ "status": "installing" }),
-            );
-            hook_handle.cleanup_before_exit();
-        })
-        .build()
-        .map_err(|e| e.to_string())?;
+    let pending = {
+        let lock = PENDING_UPDATE.lock().map_err(|e| e.to_string())?;
+        lock.clone()
+    };
 
-    let update = updater
-        .check()
-        .await
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| "no update available".to_string())?;
+    let pending = match pending {
+        Some(p) => p,
+        None => {
+            let res = check(app, true).await?;
+            if !res.available {
+                return Err("No update available to install".to_string());
+            }
+            let lock = PENDING_UPDATE.lock().map_err(|e| e.to_string())?;
+            lock.clone().ok_or_else(|| "No update asset found".to_string())?
+        }
+    };
 
     let _ = app.emit(
         "auto-update-status",
         serde_json::json!({ "status": "downloading", "progress": 0 }),
     );
 
-    let progress_handle = app.clone();
-    let downloaded = Arc::new(AtomicU64::new(0));
-    let downloaded_cb = downloaded.clone();
-    let bytes = update
-        .download(
-            move |chunk_len, total| {
-                let current =
-                    downloaded_cb.fetch_add(chunk_len as u64, Ordering::Relaxed) + chunk_len as u64;
-                if let Some(total) = total {
-                    if total > 0 {
-                        let progress = (current.saturating_mul(100) / total) as u32;
-                        let _ = progress_handle.emit(
-                            "auto-update-status",
-                            serde_json::json!({ "status": "downloading", "progress": progress }),
-                        );
-                    }
-                }
-            },
-            || {},
-        )
-        .await
+    let client = reqwest::Client::builder()
+        .user_agent("celestial-bloom")
+        .timeout(Duration::from_secs(300))
+        .build()
         .map_err(|e| e.to_string())?;
 
-    // Record the attempt before the installer is launched: on Windows the
-    // process exits from inside `install`, so a failed install would otherwise
-    // re-download and exit on every startup.
+    let mut resp = client
+        .get(&pending.download_url)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to initiate download: {e}"))?;
+
+    if !resp.status().is_success() {
+        return Err(format!("Download failed with HTTP {}", resp.status()));
+    }
+
+    let total_size = resp.content_length().unwrap_or(pending.total_size);
+    let current_exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let temp_new_exe = current_exe.with_extension("new.exe");
+
+    {
+        use std::io::Write;
+        let mut file = std::fs::File::create(&temp_new_exe)
+            .map_err(|e| format!("Failed to create {}: {e}", temp_new_exe.display()))?;
+
+        let mut downloaded: u64 = 0;
+        let mut last_progress = 0u32;
+
+        while let Some(chunk) = resp.chunk().await.map_err(|e| e.to_string())? {
+            file.write_all(&chunk).map_err(|e| e.to_string())?;
+            downloaded += chunk.len() as u64;
+
+            if total_size > 0 {
+                let progress = (downloaded.saturating_mul(100) / total_size) as u32;
+                if progress > last_progress {
+                    last_progress = progress;
+                    let _ = app.emit(
+                        "auto-update-status",
+                        serde_json::json!({ "status": "downloading", "progress": progress }),
+                    );
+                }
+            }
+        }
+        file.flush().map_err(|e| e.to_string())?;
+    }
+
+    // Record the attempt
     {
         let mut state = read_state(app);
-        state.attempted_version = update.version.clone();
+        state.attempted_version = pending.version.clone();
         state.attempted_at = now_secs();
         write_state(app, &state);
     }
 
-    update.install(bytes).map_err(|e| e.to_string())?;
+    let _ = app.emit(
+        "auto-update-status",
+        serde_json::json!({ "status": "installing" }),
+    );
 
-    // Windows: `install` launches the installer and exits inside the plugin,
-    // so this is only reached on other platforms.
+    // Pre-exit cleanup
+    crate::state::SHUTTING_DOWN.store(true, Ordering::Relaxed);
+    crate::commands::release_appbars(app);
+    crate::utils::set_taskbar_visibility(true, true);
+    crate::services::set_native_osd_suppressed(false);
+    app.cleanup_before_exit();
+
+    #[cfg(windows)]
+    {
+        let old_exe = current_exe.with_extension("old.exe");
+        let _ = std::fs::remove_file(&old_exe);
+
+        let mut swapped = false;
+        if std::fs::rename(&current_exe, &old_exe).is_ok() {
+            if std::fs::rename(&temp_new_exe, &current_exe).is_ok() {
+                swapped = true;
+            } else {
+                let _ = std::fs::rename(&old_exe, &current_exe);
+            }
+        }
+
+        if swapped {
+            let _ = std::process::Command::new(&current_exe).spawn();
+            std::process::exit(0);
+        } else {
+            let bat_path = std::env::temp_dir().join("celestial_update.bat");
+            let bat = format!(
+                "@echo off\r\n\
+                 ping 127.0.0.1 -n 2 > nul\r\n\
+                 move /y \"{}\" \"{}\"\r\n\
+                 if exist \"{}\" del /f /q \"{}\"\r\n\
+                 start \"\" \"{}\"\r\n\
+                 del \"%~f0\"\r\n",
+                temp_new_exe.display(),
+                current_exe.display(),
+                old_exe.display(),
+                old_exe.display(),
+                current_exe.display()
+            );
+            let _ = std::fs::write(&bat_path, bat);
+            let _ = std::process::Command::new("cmd")
+                .args(["/c", &bat_path.to_string_lossy()])
+                .spawn();
+            std::process::exit(0);
+        }
+    }
+
     #[cfg(not(windows))]
     {
+        let _ = std::fs::rename(&temp_new_exe, &current_exe);
         let _ = app.emit(
             "auto-update-status",
             serde_json::json!({ "status": "done" }),
         );
         app.restart()
     }
-
-    #[cfg(windows)]
-    Ok(())
 }
 
-/// Startup entry point: always checks so the UI can show an update badge, and
-/// auto-installs only when the user enabled it and the release has aged.
 pub async fn run_startup_check(app: AppHandle) {
     let auto_update =
         crate::utils::get_setting_str(&app, "bloom-auto-update").as_deref() == Some("true");
@@ -333,8 +435,7 @@ pub async fn run_startup_check(app: AppHandle) {
     let attempted_recently =
         install_attempted_recently(&read_state(&app), &attempted_version, now_secs());
 
-    if auto_update && release_is_old_enough(&result) && !attempted_recently {
-        // On Windows this never returns: the installer exits the process.
+    if auto_update && !attempted_recently {
         if install(&app).await.is_err() {
             let _ = app.emit(
                 "auto-update-status",
@@ -342,9 +443,6 @@ pub async fn run_startup_check(app: AppHandle) {
             );
         }
     } else if auto_update {
-        // An install for this version was already attempted (or is pending),
-        // so keep the badge visible instead of relaunching the installer on
-        // every startup.
         let _ = app.emit(
             "auto-update-status",
             serde_json::json!({ "status": "done" }),
@@ -354,7 +452,6 @@ pub async fn run_startup_check(app: AppHandle) {
 
 #[tauri::command]
 pub async fn check_for_updates(app: AppHandle, force: bool) -> Result<UpdateCheckResult, String> {
-    // `check` emits the result (available or not) so callers don't have to.
     check(&app, force).await
 }
 
@@ -377,75 +474,9 @@ pub fn get_update_state(app: AppHandle) -> UpdateCheckResult {
     result_from_state(&state)
 }
 
-fn parse_rfc3339_utc(value: &str) -> Option<i64> {
-    if value.len() < 20 || !value.ends_with('Z') {
-        return None;
-    }
-    let bytes = value.as_bytes();
-    if bytes[4] != b'-' || bytes[7] != b'-' || bytes[10] != b'T' {
-        return None;
-    }
-    let year: i64 = value.get(0..4)?.parse().ok()?;
-    let month: i64 = value.get(5..7)?.parse().ok()?;
-    let day: i64 = value.get(8..10)?.parse().ok()?;
-    let hour: i64 = value.get(11..13)?.parse().ok()?;
-    let minute: i64 = value.get(14..16)?.parse().ok()?;
-    let second: i64 = value.get(17..19)?.parse().ok()?;
-    if !(1..=12).contains(&month)
-        || !(1..=31).contains(&day)
-        || hour > 23
-        || minute > 59
-        || second > 60
-    {
-        return None;
-    }
-    let days = days_from_civil(year, month, day);
-    Some(days * 86_400 + hour * 3_600 + minute * 60 + second)
-}
-
-/// Howard Hinnant's days-from-civil algorithm.
-fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
-    let year = if month <= 2 { year - 1 } else { year };
-    let era = if year >= 0 { year } else { year - 399 } / 400;
-    let year_of_era = year - era * 400;
-    let shifted_month = if month > 2 { month - 3 } else { month + 9 };
-    let day_of_year = (153 * shifted_month + 2) / 5 + day - 1;
-    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
-    era * 146_097 + day_of_era - 719_468
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{
-        days_from_civil, install_attempted_recently, parse_rfc3339_utc, state_is_current,
-        PersistedUpdateState,
-    };
-
-    #[test]
-    fn parses_tauri_action_pub_date() {
-        assert_eq!(parse_rfc3339_utc("1970-01-01T00:00:00Z"), Some(0));
-        assert_eq!(
-            parse_rfc3339_utc("2026-09-13T18:14:46Z"),
-            Some(1_789_323_286)
-        );
-        assert_eq!(
-            parse_rfc3339_utc("2026-09-13T18:14:46.123Z"),
-            Some(1_789_323_286)
-        );
-    }
-
-    #[test]
-    fn rejects_non_utc_and_malformed_dates() {
-        assert_eq!(parse_rfc3339_utc("2026-09-13T18:14:46+02:00"), None);
-        assert_eq!(parse_rfc3339_utc("not-a-date"), None);
-        assert_eq!(parse_rfc3339_utc("2026-13-40T99:99:99Z"), None);
-    }
-
-    #[test]
-    fn computes_civil_days() {
-        assert_eq!(days_from_civil(1970, 1, 1), 0);
-        assert_eq!(days_from_civil(2026, 9, 13), 20_709);
-    }
+    use super::*;
 
     #[test]
     fn parses_legacy_update_state_without_attempt_fields() {
@@ -465,13 +496,13 @@ mod tests {
             ..Default::default()
         };
 
-        assert!(install_attempted_recently(&state, "3.8.8", 1_000 + 3_600));
+        assert!(install_attempted_recently(&state, "3.8.8", 1_000 + 600));
         assert!(!install_attempted_recently(
             &state,
             "3.8.8",
-            1_000 + 24 * 60 * 60
+            1_000 + 7200
         ));
-        assert!(!install_attempted_recently(&state, "3.8.9", 1_000 + 3_600));
+        assert!(!install_attempted_recently(&state, "3.8.9", 1_000 + 600));
 
         let empty = PersistedUpdateState::default();
         assert!(!install_attempted_recently(&empty, "3.8.8", 1_000));
@@ -479,15 +510,13 @@ mod tests {
 
     #[test]
     fn persisted_state_only_applies_to_the_version_that_wrote_it() {
-        // State written by 3.8.7 saying "3.9.1 is available" must not surface
-        // once 3.9.1 is installed, or the badge sticks for a whole session.
         let state = PersistedUpdateState {
-            app_version: "3.8.7".into(),
-            version: "3.9.1".into(),
+            app_version: "1.0.0".into(),
+            version: "Build #9".into(),
             ..Default::default()
         };
 
-        assert!(state_is_current(&state, "3.8.7"));
-        assert!(!state_is_current(&state, "3.9.1"));
+        assert!(state_is_current(&state, "1.0.0"));
+        assert!(!state_is_current(&state, "Build #9"));
     }
 }

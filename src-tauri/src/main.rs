@@ -123,7 +123,6 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_drag::init())
-        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             Some(vec![]),
@@ -287,6 +286,14 @@ fn main() {
             if taskbar_marker_exists() {
                 restore_taskbar_after_crash();
                 NATIVE_TASKBAR_HIDDEN.store(false, Ordering::Relaxed);
+            }
+
+            // Cleanup any temporary artifacts from previous self-updates
+            if let Ok(current_exe) = std::env::current_exe() {
+                let old_exe = current_exe.with_extension("old.exe");
+                let _ = std::fs::remove_file(old_exe);
+                let new_temp = current_exe.with_extension("new.exe");
+                let _ = std::fs::remove_file(new_temp);
             }
 
             // Update check on startup (non-blocking). Always runs so the UI can

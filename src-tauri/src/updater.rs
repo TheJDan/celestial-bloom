@@ -137,7 +137,9 @@ fn install_attempted_recently(state: &PersistedUpdateState, version: &str, now: 
 fn get_current_build_number(app: &AppHandle) -> u64 {
     if let Some(build_str) = option_env!("CELESTIAL_BUILD_NUMBER") {
         if let Ok(num) = build_str.parse::<u64>() {
-            return num;
+            if num > 0 {
+                return num;
+            }
         }
     }
     let ver = app.package_info().version.to_string();
@@ -192,8 +194,7 @@ pub async fn check(app: &AppHandle, force: bool) -> Result<UpdateCheckResult, St
     let is_newer = if remote_build > 0 && current_build > 0 {
         remote_build > current_build
     } else {
-        let current_tag = format!("v{}", current_build);
-        remote_tag != current_tag && remote_tag != "v0"
+        false
     };
 
     let exe_asset = release.assets.iter().find(|a| {
@@ -348,42 +349,51 @@ async fn install_inner(app: &AppHandle) -> Result<(), String> {
 
     #[cfg(windows)]
     {
+        // Release and close single-instance mutex and event before restart
+        crate::state::close_single_instance_handles();
+
         let old_exe = current_exe.with_extension("old.exe");
-        let _ = std::fs::remove_file(&old_exe);
+        let current_pid = std::process::id();
+        let bat_path = std::env::temp_dir().join(format!("celestial_update_{}.bat", current_pid));
+        let bat = format!(
+            "@echo off\r\n\
+             :wait_pid\r\n\
+             timeout /t 1 /nobreak > nul\r\n\
+             tasklist /fi \"PID eq {pid}\" 2>nul | findstr /i \"{pid}\" > nul\r\n\
+             if not errorlevel 1 goto wait_pid\r\n\
+             if exist \"{new_exe}\" (\r\n\
+                 if exist \"{old_exe}\" del /f /q \"{old_exe}\" > nul 2>&1\r\n\
+                 if exist \"{current_exe}\" move /y \"{current_exe}\" \"{old_exe}\" > nul 2>&1\r\n\
+                 move /y \"{new_exe}\" \"{current_exe}\" > nul 2>&1\r\n\
+             )\r\n\
+             if exist \"{old_exe}\" del /f /q \"{old_exe}\" > nul 2>&1\r\n\
+             start \"\" \"{current_exe}\"\r\n\
+             (goto) 2>nul & del \"%~f0\"\r\n",
+            pid = current_pid,
+            new_exe = temp_new_exe.display(),
+            current_exe = current_exe.display(),
+            old_exe = old_exe.display(),
+        );
 
-        let mut swapped = false;
-        if std::fs::rename(&current_exe, &old_exe).is_ok() {
-            if std::fs::rename(&temp_new_exe, &current_exe).is_ok() {
-                swapped = true;
-            } else {
-                let _ = std::fs::rename(&old_exe, &current_exe);
-            }
+        let _ = std::fs::write(&bat_path, bat);
+
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x08000000;
+            let _ = std::process::Command::new("cmd")
+                .args(["/c", &bat_path.to_string_lossy()])
+                .creation_flags(CREATE_NO_WINDOW)
+                .spawn();
         }
-
-        if swapped {
-            let _ = std::process::Command::new(&current_exe).spawn();
-            std::process::exit(0);
-        } else {
-            let bat_path = std::env::temp_dir().join("celestial_update.bat");
-            let bat = format!(
-                "@echo off\r\n\
-                 ping 127.0.0.1 -n 2 > nul\r\n\
-                 move /y \"{}\" \"{}\"\r\n\
-                 if exist \"{}\" del /f /q \"{}\"\r\n\
-                 start \"\" \"{}\"\r\n\
-                 del \"%~f0\"\r\n",
-                temp_new_exe.display(),
-                current_exe.display(),
-                old_exe.display(),
-                old_exe.display(),
-                current_exe.display()
-            );
-            let _ = std::fs::write(&bat_path, bat);
+        #[cfg(not(target_os = "windows"))]
+        {
             let _ = std::process::Command::new("cmd")
                 .args(["/c", &bat_path.to_string_lossy()])
                 .spawn();
-            std::process::exit(0);
         }
+
+        std::process::exit(0);
     }
 
     #[cfg(not(windows))]

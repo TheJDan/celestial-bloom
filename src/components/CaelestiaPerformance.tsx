@@ -47,13 +47,13 @@ export function CaelestiaPerformance() {
 		return () => clearInterval(interval);
 	}, []);
 
-	const cpuName = stats?.cpu_name || "Intel Core i7-13700H";
-	const cpuPct = Math.round(stats?.cpu_percent ?? 23);
-	const cpuTemp = Math.round(stats?.cpu_temp ?? 50);
+	const cpuName = stats?.cpu_name || "Procesador del sistema";
+	const cpuPct = Math.round(stats?.cpu_percent ?? 0);
+	const cpuTemp = Math.round(stats?.cpu_temp ?? 45);
 
-	const gpuName = stats?.gpu_name || "NVIDIA GeForce RTX 4060 Laptop GPU";
-	const gpuPct = Math.round(stats?.gpu_percent ?? 37);
-	const gpuTemp = Math.round(stats?.gpu_temp ?? 48);
+	const gpuName = stats?.gpu_name || "GPU del sistema";
+	const gpuPct = Math.round(stats?.gpu_percent ?? 0);
+	const gpuTemp = Math.round(stats?.gpu_temp ?? 42);
 
 	const ramUsed = stats?.ram_used_gb ? stats.ram_used_gb.toFixed(1) : "4.5";
 	const ramTotal = stats?.ram_total_gb ? stats.ram_total_gb.toFixed(1) : "15.4";
@@ -156,7 +156,7 @@ export function CaelestiaPerformance() {
 								<span className="cperf-sub-title">Storage</span>
 							</div>
 							<span className="cperf-sub-value">{diskUsed} / {diskTotal} GiB</span>
-							<span className="cperf-drive-pill">nvme0n1</span>
+							<span className="cperf-drive-pill">C:</span>
 						</div>
 					</div>
 

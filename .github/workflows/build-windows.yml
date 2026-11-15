@@ -26,6 +26,9 @@ jobs:
       - name: Install dependencies
         run: bun install
 
+      - name: Bump version to build number
+        run: bun scripts/bump-version.mjs 1.0.${{ github.run_number }}
+
       - name: Build frontend
         run: bun run build
 

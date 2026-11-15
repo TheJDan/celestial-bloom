@@ -323,6 +323,14 @@ fn main() {
             };
             let _ = window.set_ignore_cursor_events(true);
             let _ = window.set_background_color(Some(tauri::window::Color(0, 0, 0, 0)));
+            if let Ok(hwnd) = window.hwnd() {
+                unsafe {
+                    use windows::Win32::Graphics::Gdi::SetWindowRgn;
+                    use windows::Win32::UI::WindowsAndMessaging::{SetClassLongPtrW, GCLP_HBRBACKGROUND};
+                    let _ = SetWindowRgn(hwnd, None, false);
+                    let _ = SetClassLongPtrW(hwnd, GCLP_HBRBACKGROUND, 0);
+                }
+            }
 
             let dock_win = match app.get_webview_window("dock") {
                 Some(w) => w,
@@ -335,6 +343,12 @@ fn main() {
             let _ = dock_win.set_background_color(Some(tauri::window::Color(0, 0, 0, 0)));
             if let Ok(hwnd) = dock_win.hwnd() {
                 DOCK_HWND.store(hwnd.0 as isize, Ordering::Relaxed);
+                unsafe {
+                    use windows::Win32::Graphics::Gdi::SetWindowRgn;
+                    use windows::Win32::UI::WindowsAndMessaging::{SetClassLongPtrW, GCLP_HBRBACKGROUND};
+                    let _ = SetWindowRgn(hwnd, None, false);
+                    let _ = SetClassLongPtrW(hwnd, GCLP_HBRBACKGROUND, 0);
+                }
             }
             log_boot("setup() step 4: windows retrieved");
 

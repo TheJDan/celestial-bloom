@@ -59,8 +59,8 @@ pub fn set_window_region(window: Window, rects: Vec<IntRect>) {
             let _ = DeleteObject(part.into());
         }
         // The system owns the region from here on, so it isn't deleted on
-        // success. Redraw so the newly uncovered parts paint.
-        if SetWindowRgn(hwnd, Some(region), true) == 0 {
+        // success. Do not force GDI redraw (false) so transparent WebView2 DirectComposition layers don't flash white.
+        if SetWindowRgn(hwnd, Some(region), false) == 0 {
             let _ = DeleteObject(region.into());
         }
     }

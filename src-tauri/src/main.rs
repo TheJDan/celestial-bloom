@@ -322,6 +322,7 @@ fn main() {
                 }
             };
             let _ = window.set_ignore_cursor_events(true);
+            let _ = window.set_background_color(Some(tauri::window::Color(0, 0, 0, 0)));
 
             let dock_win = match app.get_webview_window("dock") {
                 Some(w) => w,
@@ -331,6 +332,7 @@ fn main() {
                 }
             };
             let _ = dock_win.set_ignore_cursor_events(true);
+            let _ = dock_win.set_background_color(Some(tauri::window::Color(0, 0, 0, 0)));
             if let Ok(hwnd) = dock_win.hwnd() {
                 DOCK_HWND.store(hwnd.0 as isize, Ordering::Relaxed);
             }
@@ -424,6 +426,7 @@ fn main() {
                 // Layered from the start, like the notch and dock (see
                 // set_click_through): the overlay has a window region too.
                 let _ = ov_win.set_ignore_cursor_events(true);
+                let _ = ov_win.set_background_color(Some(tauri::window::Color(0, 0, 0, 0)));
                 let _ = ov_win.show();
                 let _ = ov_win.hide();
                 let overlay_handle = app.handle().clone();

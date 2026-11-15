@@ -23,34 +23,65 @@ interface CaelestiaNotificationsTabProps {
 }
 
 export function CaelestiaNotificationsTab({ onSwitchTab }: CaelestiaNotificationsTabProps) {
-	const [groups, setGroups] = useState<NotificationGroup[]>([
-		{
-			appId: "screenshot",
-			appName: "Screenshot",
-			icon: <Camera size={14} color="rgba(255, 255, 255, 0.7)" />,
-			items: [
-				{
-					id: "notif-1",
-					title: "Screenshot Captured",
-					time: "ahora",
-					subtitle: "Saved to /home/Dan/Pictures/Screenshots/screenshot-2026-1...",
-					isNew: true
-				},
-				{
-					id: "notif-2",
-					title: "Screenshot Captured",
-					time: "ahora",
-					subtitle: "Saved to /home/Dan/Pictures/Screenshots/screenshot-2026-1...",
-					isNew: true
+	const [groups, setGroups] = useState<NotificationGroup[]>(() => {
+		try {
+			const saved = localStorage.getItem("caelestia-notifications");
+			if (saved) return JSON.parse(saved);
+		} catch {}
+		return [];
+	});
+
+	React.useEffect(() => {
+		const handleAddNotif = (e: any) => {
+			if (!e.detail) return;
+			const { appId = "system", appName = "Sistema", title, subtitle, iconType } = e.detail;
+			const newItem: NotificationItem = {
+				id: `notif-${Date.now()}`,
+				title: title || "Notificación",
+				time: "ahora",
+				subtitle: subtitle || "",
+				isNew: true
+			};
+
+			setGroups((prev) => {
+				const existingIndex = prev.findIndex((g) => g.appId === appId);
+				let updated: NotificationGroup[];
+				if (existingIndex >= 0) {
+					updated = prev.map((g, idx) =>
+						idx === existingIndex ? { ...g, items: [newItem, ...g.items] } : g
+					);
+				} else {
+					const newGroup: NotificationGroup = {
+						appId,
+						appName,
+						icon:
+							iconType === "screenshot" ? (
+								<Camera size={14} color="rgba(255, 255, 255, 0.7)" />
+							) : (
+								<Bell size={14} color="rgba(255, 255, 255, 0.7)" />
+							),
+						items: [newItem]
+					};
+					updated = [newGroup, ...prev];
 				}
-			]
-		}
-	]);
+				try {
+					localStorage.setItem("caelestia-notifications", JSON.stringify(updated));
+				} catch {}
+				return updated;
+			});
+		};
+
+		window.addEventListener("caelestia-add-notification", handleAddNotif);
+		return () => window.removeEventListener("caelestia-add-notification", handleAddNotif);
+	}, []);
 
 	const totalNew = groups.reduce((acc, g) => acc + g.items.filter((i) => i.isNew).length, 0);
 
 	const handleClearAll = () => {
 		setGroups([]);
+		try {
+			localStorage.removeItem("caelestia-notifications");
+		} catch {}
 	};
 
 	return (
@@ -115,7 +146,7 @@ export function CaelestiaNotificationsTab({ onSwitchTab }: CaelestiaNotification
 					<div className="cnotif-empty-state">
 						<Bell size={32} color="rgba(255, 255, 255, 0.2)" />
 						<div className="cnotif-empty-title">Sin notificaciones</div>
-						<div className="cnotif-empty-sub">Las nuevas se guardarán aquí.</div>
+						<div className="cnotif-empty-sub">Las notificaciones y capturas del sistema aparecerán aquí</div>
 					</div>
 				)}
 			</div>

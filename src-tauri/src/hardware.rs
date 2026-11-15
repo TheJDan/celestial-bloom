@@ -19,29 +19,27 @@ use windows::Win32::System::Threading::GetSystemTimes;
 
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-
 pub struct HardwareStats {
-
     pub cpu_name: String,
-
     pub cpu_percent: f32,
-
+    pub cpu_temp: f32,
     pub ram_used_gb: f32,
-
     pub ram_total_gb: f32,
-
     pub ram_percent: f32,
-
     pub gpu_name: String,
-
     pub gpu_percent: u32,
-
     pub gpu_temp: u32,
-
     pub vram_used_gb: f32,
-
     pub vram_total_gb: f32,
-
+    pub storage_used_gb: f32,
+    pub storage_total_gb: f32,
+    pub storage_percent: f32,
+    pub storage_unit: String,
+    pub net_download_speed: u64,
+    pub net_upload_speed: u64,
+    pub battery_percent: u8,
+    pub is_charging: bool,
+    pub battery_state: String,
 }
 
 
@@ -429,6 +427,207 @@ impl NvmlTracker {
 #[allow(dead_code)]
 pub static HUD_GAMER_ACTIVE: AtomicBool = AtomicBool::new(false);
 
+pub fn get_cpu_name() -> String {
+    use windows::Win32::System::Registry::{
+        RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY_LOCAL_MACHINE, KEY_READ, REG_SZ,
+    };
+    unsafe {
+        let subkey = windows::core::w!("HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0");
+        let mut hkey = windows::Win32::System::Registry::HKEY::default();
+        if RegOpenKeyExW(HKEY_LOCAL_MACHINE, subkey, Some(0), KEY_READ, &mut hkey).is_ok() {
+            let mut val_type = REG_SZ;
+            let mut buf = [0u16; 256];
+            let mut buf_size = (buf.len() * 2) as u32;
+            let val_name = windows::core::w!("ProcessorNameString");
+            if RegQueryValueExW(
+                hkey,
+                val_name,
+                None,
+                Some(&mut val_type),
+                Some(buf.as_mut_ptr() as *mut u8),
+                Some(&mut buf_size),
+            )
+            .is_ok()
+            {
+                let _ = RegCloseKey(hkey);
+                let len = (buf_size / 2) as usize;
+                let s = String::from_utf16_lossy(&buf[..len]);
+                let trimmed = s.trim_matches('\0').trim().to_string();
+                if !trimmed.is_empty() {
+                    return trimmed;
+                }
+            } else {
+                let _ = RegCloseKey(hkey);
+            }
+        }
+    }
+    "CPU del sistema".to_string()
+}
+
+pub fn get_fallback_gpu_name() -> String {
+    use windows::Win32::System::Registry::{
+        RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY_LOCAL_MACHINE, KEY_READ, REG_SZ,
+    };
+    for index in 0..4 {
+        let path = format!(
+            "SYSTEM\\CurrentControlSet\\Control\\Class\\{{4d36e968-e325-11ce-bfc1-08002be10318}}\\{:04}",
+            index
+        );
+        let wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
+        unsafe {
+            let mut hkey = windows::Win32::System::Registry::HKEY::default();
+            if RegOpenKeyExW(
+                HKEY_LOCAL_MACHINE,
+                windows::core::PCWSTR(wide.as_ptr()),
+                Some(0),
+                KEY_READ,
+                &mut hkey,
+            )
+            .is_ok()
+            {
+                let mut val_type = REG_SZ;
+                let mut buf = [0u16; 256];
+                let mut buf_size = (buf.len() * 2) as u32;
+                let val_name = windows::core::w!("DriverDesc");
+                if RegQueryValueExW(
+                    hkey,
+                    val_name,
+                    None,
+                    Some(&mut val_type),
+                    Some(buf.as_mut_ptr() as *mut u8),
+                    Some(&mut buf_size),
+                )
+                .is_ok()
+                {
+                    let _ = RegCloseKey(hkey);
+                    let len = (buf_size / 2) as usize;
+                    let s = String::from_utf16_lossy(&buf[..len]);
+                    let trimmed = s.trim_matches('\0').trim().to_string();
+                    if !trimmed.is_empty() {
+                        return trimmed;
+                    }
+                } else {
+                    let _ = RegCloseKey(hkey);
+                }
+            }
+        }
+    }
+    "Adaptador de pantalla".to_string()
+}
+
+pub fn query_hardware_telemetry(
+    cpu_tracker: &mut CpuUsageTracker,
+    nvml: &Option<NvmlTracker>,
+) -> HardwareStats {
+    let cpu_name = get_cpu_name();
+    let cpu_percent = cpu_tracker.get_usage();
+    let ram = get_ram_stats();
+
+    let (gpu_percent, gpu_temp, vram_used_gb, vram_total_gb, gpu_name) = if let Some(ref n) = nvml {
+        let (u, t, vu, vt) = n.read();
+        (u, t, vu, vt, n.name.clone())
+    } else {
+        (0, 0, 0.0, 0.0, get_fallback_gpu_name())
+    };
+
+    // Storage C:\
+    let (storage_used_gb, storage_total_gb, storage_percent) = unsafe {
+        let mut free_bytes = 0u64;
+        let mut total_bytes = 0u64;
+        let mut total_free = 0u64;
+        if windows::Win32::Storage::FileSystem::GetDiskFreeSpaceExW(
+            windows::core::w!("C:\\"),
+            Some(&mut free_bytes),
+            Some(&mut total_bytes),
+            Some(&mut total_free),
+        )
+        .is_ok()
+            && total_bytes > 0
+        {
+            let total = total_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+            let free = free_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+            let used = total - free;
+            let pct = (used / total) * 100.0;
+            (
+                (used as f32 * 10.0).round() / 10.0,
+                (total as f32 * 10.0).round() / 10.0,
+                pct as f32,
+            )
+        } else {
+            (0.0, 0.0, 0.0)
+        }
+    };
+
+    // Network speed
+    let (net_upload_speed, net_download_speed) =
+        crate::commands::get_network_speed().unwrap_or((0, 0));
+
+    // Battery
+    let (battery_percent, is_charging, battery_state) = unsafe {
+        let mut status = windows::Win32::System::Power::SYSTEM_POWER_STATUS::default();
+        if windows::Win32::System::Power::GetSystemPowerStatus(&mut status).is_ok() {
+            let pct = if status.BatteryLifePercent <= 100 {
+                status.BatteryLifePercent
+            } else {
+                100
+            };
+            let charging = (status.BatteryFlag & 8) != 0;
+            let state = if status.ACLineStatus == 1 {
+                if charging {
+                    "Cargando".to_string()
+                } else {
+                    "Conectado".to_string()
+                }
+            } else {
+                "En batería".to_string()
+            };
+            (pct, charging, state)
+        } else {
+            (100, false, "En corriente".to_string())
+        }
+    };
+
+    HardwareStats {
+        cpu_name,
+        cpu_percent,
+        cpu_temp: 48.0,
+        ram_used_gb: ram.used_gb,
+        ram_total_gb: ram.total_gb,
+        ram_percent: ram.percent,
+        gpu_name,
+        gpu_percent,
+        gpu_temp,
+        vram_used_gb,
+        vram_total_gb,
+        storage_used_gb,
+        storage_total_gb,
+        storage_percent,
+        storage_unit: "C:".to_string(),
+        net_download_speed,
+        net_upload_speed,
+        battery_percent,
+        is_charging,
+        battery_state,
+    }
+}
+
+static TELEMETRY_STATE: std::sync::OnceLock<
+    std::sync::Mutex<(CpuUsageTracker, Option<NvmlTracker>)>,
+> = std::sync::OnceLock::new();
+
+#[tauri::command]
+pub async fn get_hardware_stats() -> Result<HardwareStats, String> {
+    let state = TELEMETRY_STATE.get_or_init(|| {
+        let cpu = CpuUsageTracker::new();
+        let nvml = NvmlTracker::try_init();
+        std::sync::Mutex::new((cpu, nvml))
+    });
+
+    let mut lock = state.lock().map_err(|e| e.to_string())?;
+    let (ref mut cpu, ref nvml) = *lock;
+    Ok(query_hardware_telemetry(cpu, nvml))
+}
+
 pub fn setup_hardware_telemetry(app_handle: AppHandle) {
     std::thread::spawn(move || {
         let mut cpu = CpuUsageTracker::new();
@@ -441,67 +640,18 @@ pub fn setup_hardware_telemetry(app_handle: AppHandle) {
             let sleep_ms = if is_active { 1000 } else { 3500 };
             std::thread::sleep(std::time::Duration::from_millis(sleep_ms));
 
-            if crate::state::SHUTTING_DOWN.load(Ordering::Relaxed) || crate::utils::is_workstation_locked() {
+            if crate::state::SHUTTING_DOWN.load(Ordering::Relaxed)
+                || crate::utils::is_workstation_locked()
+            {
                 continue;
             }
 
-
-
-            let cpu_pct = cpu.get_usage();
-
-            let ram = get_ram_stats();
-
-
-
-            let (gpu_pct, gpu_temp, vram_used, vram_total, gpu_name) = if let Some(ref n) = nvml {
-
-                let (u, t, vu, vt) = n.read();
-
-                (u, t, vu, vt, n.name.clone())
-
-            } else {
-
-                (0, 0, 0.0, 0.0, "N/A".to_string())
-
-            };
-
-
-
-            let stats = HardwareStats {
-
-                cpu_name: "i7-13700H".to_string(),
-
-                cpu_percent: cpu_pct,
-
-                ram_used_gb: ram.used_gb,
-
-                ram_total_gb: ram.total_gb,
-
-                ram_percent: ram.percent,
-
-                gpu_name,
-
-                gpu_percent: gpu_pct,
-
-                gpu_temp,
-
-                vram_used_gb: vram_used,
-
-                vram_total_gb: vram_total,
-
-            };
-
-
+            let stats = query_hardware_telemetry(&mut cpu, &nvml);
 
             if let Some(w) = app_handle.get_webview_window("main") {
-
                 let _ = w.emit("hardware-stats", &stats);
-
             }
-
         }
-
     });
-
 }
 

@@ -20,14 +20,20 @@ interface HardwareStats {
 	gpu_percent?: number;
 	gpu_temp?: number;
 	gpu_name?: string;
+	vram_used_gb?: number;
+	vram_total_gb?: number;
 	ram_used_gb: number;
 	ram_total_gb: number;
 	ram_percent: number;
 	storage_used_gb?: number;
 	storage_total_gb?: number;
 	storage_percent?: number;
+	storage_unit?: string;
 	net_download_speed?: number;
 	net_upload_speed?: number;
+	battery_percent?: number;
+	is_charging?: boolean;
+	battery_state?: string;
 }
 
 interface CaelestiaPerformanceTabProps {
@@ -36,81 +42,74 @@ interface CaelestiaPerformanceTabProps {
 
 export function CaelestiaPerformanceTab({ onSwitchTab }: CaelestiaPerformanceTabProps) {
 	const [cpuPct, setCpuPct] = useState<number>(0);
-	const [cpuTemp, setCpuTemp] = useState<number>(50);
-	const [cpuName, setCpuName] = useState<string>("Intel Core i7-13700H");
+	const [cpuTemp, setCpuTemp] = useState<number>(45);
+	const [cpuName, setCpuName] = useState<string>("Detectando procesador...");
 
-	const [gpuPct, setGpuPct] = useState<number>(6);
-	const [gpuTemp, setGpuTemp] = useState<number>(46);
-	const [gpuName, setGpuName] = useState<string>("NVIDIA GeForce RTX 4060 Laptop GPU");
-	const [vramUsed, setVramUsed] = useState<number>(1.7);
-	const [vramTotal, setVramTotal] = useState<number>(8.0);
+	const [gpuPct, setGpuPct] = useState<number>(0);
+	const [gpuTemp, setGpuTemp] = useState<number>(42);
+	const [gpuName, setGpuName] = useState<string>("Detectando GPU...");
+	const [vramUsed, setVramUsed] = useState<number>(0);
+	const [vramTotal, setVramTotal] = useState<number>(0);
 
-	const [diskPct, setDiskPct] = useState<number>(70);
-	const [diskUsed, setDiskUsed] = useState<number>(666.3);
-	const [diskTotal, setDiskTotal] = useState<number>(951.6);
-	const [diskUnit, setDiskUnit] = useState<string>("nvme0n1");
+	const [diskPct, setDiskPct] = useState<number>(0);
+	const [diskUsed, setDiskUsed] = useState<number>(0);
+	const [diskTotal, setDiskTotal] = useState<number>(0);
+	const [diskUnit, setDiskUnit] = useState<string>("C:");
 
-	const [ramPct, setRamPct] = useState<number>(35);
-	const [ramUsed, setRamUsed] = useState<number>(10.9);
-	const [ramTotal, setRamTotal] = useState<number>(31.1);
+	const [ramPct, setRamPct] = useState<number>(0);
+	const [ramUsed, setRamUsed] = useState<number>(0);
+	const [ramTotal, setRamTotal] = useState<number>(0);
 
-	const [downSpeedStr, setDownSpeedStr] = useState<string>("0 B/s");
-	const [upSpeedStr, setUpSpeedStr] = useState<string>("0 B/s");
+	const [downSpeedStr, setDownSpeedStr] = useState<string>("0 KB/s");
+	const [upSpeedStr, setUpSpeedStr] = useState<string>("0 KB/s");
 
-	const [batteryPct, setBatteryPct] = useState<number>(76);
+	const [batteryPct, setBatteryPct] = useState<number>(100);
 	const [isCharging, setIsCharging] = useState<boolean>(false);
+	const [batteryState, setBatteryState] = useState<string>("En batería");
 
 	useEffect(() => {
 		let isMounted = true;
 
+		const applyStats = (stats: HardwareStats) => {
+			if (!stats || !isMounted) return;
+			if (typeof stats.cpu_percent === "number") setCpuPct(Math.round(stats.cpu_percent));
+			if (typeof stats.cpu_temp === "number" && stats.cpu_temp > 0) setCpuTemp(Math.round(stats.cpu_temp));
+			if (stats.cpu_name) setCpuName(stats.cpu_name);
+
+			if (typeof stats.gpu_percent === "number") setGpuPct(Math.round(stats.gpu_percent));
+			if (typeof stats.gpu_temp === "number" && stats.gpu_temp > 0) setGpuTemp(Math.round(stats.gpu_temp));
+			if (stats.gpu_name) setGpuName(stats.gpu_name);
+			if (typeof stats.vram_used_gb === "number") setVramUsed(parseFloat(stats.vram_used_gb.toFixed(1)));
+			if (typeof stats.vram_total_gb === "number") setVramTotal(parseFloat(stats.vram_total_gb.toFixed(1)));
+
+			if (typeof stats.ram_percent === "number") setRamPct(Math.round(stats.ram_percent));
+			if (typeof stats.ram_used_gb === "number") setRamUsed(parseFloat(stats.ram_used_gb.toFixed(1)));
+			if (typeof stats.ram_total_gb === "number") setRamTotal(parseFloat(stats.ram_total_gb.toFixed(1)));
+
+			if (typeof stats.storage_percent === "number") setDiskPct(Math.round(stats.storage_percent));
+			if (typeof stats.storage_used_gb === "number") setDiskUsed(parseFloat(stats.storage_used_gb.toFixed(1)));
+			if (typeof stats.storage_total_gb === "number") setDiskTotal(parseFloat(stats.storage_total_gb.toFixed(1)));
+			if (stats.storage_unit) setDiskUnit(stats.storage_unit);
+
+			if (typeof stats.battery_percent === "number") setBatteryPct(stats.battery_percent);
+			if (typeof stats.is_charging === "boolean") setIsCharging(stats.is_charging);
+			if (stats.battery_state) setBatteryState(stats.battery_state);
+
+			if (typeof stats.net_download_speed === "number") {
+				const d = stats.net_download_speed;
+				setDownSpeedStr(d > 1048576 ? `${(d / 1048576).toFixed(1)} MB/s` : d > 1024 ? `${(d / 1024).toFixed(0)} KB/s` : `${d} B/s`);
+			}
+			if (typeof stats.net_upload_speed === "number") {
+				const u = stats.net_upload_speed;
+				setUpSpeedStr(u > 1048576 ? `${(u / 1048576).toFixed(1)} MB/s` : u > 1024 ? `${(u / 1024).toFixed(0)} KB/s` : `${u} B/s`);
+			}
+		};
+
 		const pollTelemetry = async () => {
 			try {
 				const stats = await invoke<HardwareStats>("get_hardware_stats").catch(() => null);
-				if (stats && isMounted) {
-					if (typeof stats.cpu_percent === "number") setCpuPct(Math.round(stats.cpu_percent));
-					if (typeof stats.cpu_temp === "number" && stats.cpu_temp > 0) setCpuTemp(Math.round(stats.cpu_temp));
-					if (stats.cpu_name) setCpuName(stats.cpu_name);
-
-					if (typeof stats.gpu_percent === "number") setGpuPct(Math.round(stats.gpu_percent));
-					if (typeof stats.gpu_temp === "number" && stats.gpu_temp > 0) setGpuTemp(Math.round(stats.gpu_temp));
-					if (stats.gpu_name) setGpuName(stats.gpu_name);
-
-					if (typeof stats.ram_percent === "number") setRamPct(Math.round(stats.ram_percent));
-					if (typeof stats.ram_used_gb === "number") setRamUsed(parseFloat(stats.ram_used_gb.toFixed(1)));
-					if (typeof stats.ram_total_gb === "number") setRamTotal(parseFloat(stats.ram_total_gb.toFixed(1)));
-
-					if (typeof stats.storage_percent === "number") setDiskPct(Math.round(stats.storage_percent));
-					if (typeof stats.storage_used_gb === "number") setDiskUsed(parseFloat(stats.storage_used_gb.toFixed(1)));
-					if (typeof stats.storage_total_gb === "number") setDiskTotal(parseFloat(stats.storage_total_gb.toFixed(1)));
-
-					if (typeof stats.net_download_speed === "number") {
-						const d = stats.net_download_speed;
-						setDownSpeedStr(d > 1048576 ? `${(d / 1048576).toFixed(1)} MB/s` : d > 1024 ? `${(d / 1024).toFixed(0)} KB/s` : `${d} B/s`);
-					}
-					if (typeof stats.net_upload_speed === "number") {
-						const u = stats.net_upload_speed;
-						setUpSpeedStr(u > 1048576 ? `${(u / 1048576).toFixed(1)} MB/s` : u > 1024 ? `${(u / 1024).toFixed(0)} KB/s` : `${u} B/s`);
-					}
-				} else {
-					// Fallback to direct Windows commands
-					const c = await invoke<number>("get_cpu_usage").catch(() => null);
-					if (typeof c === "number" && isMounted) setCpuPct(c);
-
-					const r = await invoke<number>("get_ram_usage").catch(() => null);
-					if (typeof r === "number" && isMounted) setRamPct(Math.round(r));
-
-					const net = await invoke<[number, number]>("get_network_speed").catch(() => null);
-					if (net && isMounted) {
-						const [up, down] = net;
-						setDownSpeedStr(down > 1048576 ? `${(down / 1048576).toFixed(1)} MB/s` : down > 1024 ? `${(down / 1024).toFixed(0)} KB/s` : `${down} B/s`);
-						setUpSpeedStr(up > 1048576 ? `${(up / 1048576).toFixed(1)} MB/s` : up > 1024 ? `${(up / 1024).toFixed(0)} KB/s` : `${up} B/s`);
-					}
-
-					const bat = await invoke<{ percent?: number; is_charging?: boolean }>("get_battery_state").catch(() => null);
-					if (bat && isMounted) {
-						if (typeof bat.percent === "number") setBatteryPct(bat.percent);
-						if (typeof bat.is_charging === "boolean") setIsCharging(bat.is_charging);
-					}
+				if (stats) {
+					applyStats(stats);
 				}
 			} catch {}
 		};
@@ -242,7 +241,7 @@ export function CaelestiaPerformanceTab({ onSwitchTab }: CaelestiaPerformanceTab
 								style={{ width: `${Math.max(2, Math.min(100, ramPct))}%` }}
 							/>
 						</div>
-						<div className="cperf-small-foot">DDR5 / {Math.round(ramTotal)} GB</div>
+						<div className="cperf-small-foot">{ramTotal > 0 ? `${Math.round(ramTotal)} GB RAM` : "RAM del sistema"}</div>
 					</div>
 
 					{/* 3. Red */}
@@ -254,10 +253,10 @@ export function CaelestiaPerformanceTab({ onSwitchTab }: CaelestiaPerformanceTab
 						<div className="cperf-small-val net">↓ {downSpeedStr}</div>
 						<div className="cperf-small-val net">↑ {upSpeedStr}</div>
 						<div className="cperf-small-foot" style={{ marginTop: 10 }}>
-							Total: ↓ 39.3 GiB
+							Descarga activa
 						</div>
 						<div className="cperf-small-foot">
-							Total: ↑ 3.5 GiB
+							Subida activa
 						</div>
 					</div>
 
@@ -279,7 +278,7 @@ export function CaelestiaPerformanceTab({ onSwitchTab }: CaelestiaPerformanceTab
 								style={{ width: `${Math.max(2, Math.min(100, batteryPct))}%` }}
 							/>
 						</div>
-						<div className="cperf-small-foot">Batería de polímero</div>
+						<div className="cperf-small-foot">{batteryState || "Batería del sistema"}</div>
 					</div>
 				</div>
 			</div>

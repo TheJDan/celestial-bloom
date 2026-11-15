@@ -896,13 +896,21 @@
 	color: #ffffff;
 }
 
+.chome-toggle-btn.active-red {
+	background: rgba(255, 69, 58, 0.22);
+	border-color: rgba(255, 69, 58, 0.45);
+	color: #ff453a;
+}
+
 /* ── Columns Layout ── */
 .chome-columns {
-	display: flex;
-	gap: 26px;
+	display: grid;
+	grid-template-columns: 300px minmax(240px, 1fr) 200px;
+	gap: 20px;
 	width: 100%;
-	flex: 1;
-	align-items: flex-start;
+	min-width: 0;
+	box-sizing: border-box;
+	align-items: start;
 }
 
 /* ── Col 1: Left (MusicCard + Calendar) ── */
@@ -1170,8 +1178,9 @@
 	flex: 1;
 	display: flex;
 	flex-direction: column;
-	gap: 22px;
+	gap: 20px;
 	min-width: 0;
+	overflow: hidden;
 }
 
 .chome-weather-card {
@@ -1179,6 +1188,8 @@
 	flex-direction: column;
 	gap: 14px;
 	width: 100%;
+	min-width: 0;
+	overflow: hidden;
 }
 
 .chome-weather-main-row {
@@ -1188,7 +1199,7 @@
 }
 
 .chome-weather-deg {
-	font-size: 52px;
+	font-size: 42px;
 	font-weight: 200;
 	letter-spacing: -1px;
 	color: #ffffff;
@@ -1218,7 +1229,7 @@
 .chome-weather-hourly-row {
 	display: flex;
 	align-items: center;
-	gap: 18px;
+	gap: 12px;
 }
 
 .chome-hourly-item {
@@ -1267,6 +1278,8 @@
 	flex-direction: column;
 	gap: 8px;
 	flex-shrink: 0;
+	min-width: 0;
+	overflow: hidden;
 }
 
 .chome-timer-card {
@@ -2410,4 +2423,539 @@
 	border-top: 1px solid rgba(255, 255, 255, 0.05);
 	padding-top: 8px;
 	margin-top: 6px;
+}
+
+/* ══════════════════════════════════════════════════════════════
+   CAELESTIA TOOLS SUBVIEWS (CLIPBOARD, SHELF, LINKS, COLOR)
+   ══════════════════════════════════════════════════════════════ */
+
+.ctool-subview-container {
+	width: 100%;
+	flex: 1;
+	min-height: 0;
+	display: flex;
+	flex-direction: column;
+}
+
+.ctool-subview {
+	width: 100%;
+	flex: 1;
+	display: flex;
+	flex-direction: column;
+	min-height: 0;
+	gap: 12px;
+}
+
+.ctool-action-bar {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 12px;
+	width: 100%;
+}
+
+.ctool-heading-title {
+	font-size: 11.5px;
+	font-weight: 700;
+	color: rgba(255, 255, 255, 0.45);
+	letter-spacing: 0.5px;
+}
+
+.ctool-search-box {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	background: rgba(255, 255, 255, 0.05);
+	border: 1px solid rgba(255, 255, 255, 0.08);
+	border-radius: 10px;
+	padding: 6px 12px;
+	flex: 1;
+	max-width: 380px;
+}
+
+.ctool-search-input {
+	background: transparent;
+	border: none;
+	outline: none;
+	color: #ffffff;
+	font-size: 12.5px;
+	width: 100%;
+}
+
+.ctool-search-input::placeholder {
+	color: rgba(255, 255, 255, 0.35);
+}
+
+.ctool-btn-primary {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	padding: 6px 14px;
+	border-radius: 999px;
+	background: #007aff;
+	color: #ffffff;
+	border: none;
+	font-size: 12px;
+	font-weight: 600;
+	cursor: pointer;
+	transition: background 0.15s ease;
+}
+
+.ctool-btn-primary:hover {
+	background: #006be0;
+}
+
+.ctool-btn-secondary {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	padding: 5px 12px;
+	border-radius: 999px;
+	background: rgba(255, 255, 255, 0.07);
+	color: rgba(255, 255, 255, 0.75);
+	border: 1px solid rgba(255, 255, 255, 0.08);
+	font-size: 11.5px;
+	font-weight: 500;
+	cursor: pointer;
+	transition: all 0.15s ease;
+}
+
+.ctool-btn-secondary:hover {
+	background: rgba(255, 255, 255, 0.12);
+	color: #ffffff;
+}
+
+.ctool-empty-box {
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	justify-content: center;
+	gap: 8px;
+	padding: 48px 24px;
+	text-align: center;
+	background: rgba(255, 255, 255, 0.02);
+	border: 1.5px dashed rgba(255, 255, 255, 0.1);
+	border-radius: 16px;
+	flex: 1;
+}
+
+.ctool-empty-title {
+	font-size: 14px;
+	font-weight: 600;
+	color: rgba(255, 255, 255, 0.7);
+}
+
+.ctool-empty-desc {
+	font-size: 12px;
+	color: rgba(255, 255, 255, 0.4);
+	max-width: 320px;
+	line-height: 1.4;
+}
+
+/* ── Clipboard Items List ── */
+.cclipboard-list {
+	display: grid;
+	grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+	gap: 10px;
+	overflow-y: auto;
+	flex: 1;
+	padding-right: 4px;
+}
+
+.cclipboard-card {
+	display: flex;
+	flex-direction: column;
+	justify-content: space-between;
+	padding: 10px 12px;
+	border-radius: 12px;
+	background: rgba(255, 255, 255, 0.04);
+	border: 1px solid rgba(255, 255, 255, 0.06);
+	gap: 8px;
+	transition: background 0.15s ease;
+}
+
+.cclipboard-card:hover {
+	background: rgba(255, 255, 255, 0.07);
+}
+
+.cclipboard-text {
+	font-size: 12.5px;
+	color: #ffffff;
+	line-height: 1.4;
+	display: -webkit-box;
+	-webkit-line-clamp: 3;
+	-webkit-box-orient: vertical;
+	overflow: hidden;
+	word-break: break-all;
+}
+
+.cclipboard-footer {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	border-top: 1px solid rgba(255, 255, 255, 0.05);
+	padding-top: 6px;
+}
+
+.cclipboard-meta {
+	font-size: 11px;
+	color: rgba(255, 255, 255, 0.35);
+}
+
+.cclipboard-actions {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+}
+
+.cclipboard-copy-btn {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+	padding: 3px 8px;
+	border-radius: 6px;
+	background: rgba(255, 255, 255, 0.08);
+	border: none;
+	color: rgba(255, 255, 255, 0.85);
+	font-size: 11px;
+	font-weight: 500;
+	cursor: pointer;
+	transition: all 0.15s ease;
+}
+
+.cclipboard-copy-btn.copied {
+	background: rgba(48, 209, 88, 0.2);
+	color: #30d158;
+}
+
+.cclipboard-del-btn {
+	background: transparent;
+	border: none;
+	color: rgba(255, 255, 255, 0.3);
+	cursor: pointer;
+	padding: 4px;
+	border-radius: 4px;
+}
+
+.cclipboard-del-btn:hover {
+	color: #ff453a;
+}
+
+/* ── Shelf View ── */
+.cshelf-files-grid {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	overflow-y: auto;
+	flex: 1;
+}
+
+.cshelf-file-card {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	padding: 8px 12px;
+	border-radius: 10px;
+	background: rgba(255, 255, 255, 0.04);
+	border: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.cshelf-file-left {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	min-width: 0;
+	flex: 1;
+}
+
+.cshelf-file-icon {
+	width: 32px;
+	height: 32px;
+	border-radius: 8px;
+	background: rgba(255, 255, 255, 0.06);
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	flex-shrink: 0;
+}
+
+.cshelf-file-meta {
+	min-width: 0;
+	flex: 1;
+}
+
+.cshelf-file-name {
+	font-size: 12.5px;
+	font-weight: 600;
+	color: #ffffff;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.cshelf-file-path {
+	font-size: 11px;
+	color: rgba(255, 255, 255, 0.4);
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.cshelf-file-actions {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	margin-left: 12px;
+}
+
+.cshelf-open-btn {
+	padding: 4px 10px;
+	border-radius: 6px;
+	background: rgba(255, 255, 255, 0.08);
+	border: none;
+	color: #ffffff;
+	font-size: 11.5px;
+	font-weight: 500;
+	cursor: pointer;
+}
+
+.cshelf-open-btn:hover {
+	background: #007aff;
+}
+
+.cshelf-delete-btn {
+	background: transparent;
+	border: none;
+	color: rgba(255, 255, 255, 0.35);
+	cursor: pointer;
+	padding: 4px;
+}
+
+.cshelf-delete-btn:hover {
+	color: #ff453a;
+}
+
+.cshelf-drop-area {
+	cursor: pointer;
+	transition: background 0.15s ease;
+}
+
+.cshelf-drop-area:hover {
+	background: rgba(255, 255, 255, 0.05);
+}
+
+/* ── Links View ── */
+.clinks-add-form {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	background: rgba(255, 255, 255, 0.04);
+	border: 1px solid rgba(255, 255, 255, 0.08);
+	border-radius: 12px;
+	padding: 10px 12px;
+}
+
+.clinks-form-input {
+	flex: 1;
+	background: rgba(0, 0, 0, 0.3);
+	border: 1px solid rgba(255, 255, 255, 0.1);
+	border-radius: 8px;
+	padding: 6px 10px;
+	color: #ffffff;
+	font-size: 12px;
+	outline: none;
+}
+
+.clinks-grid {
+	display: grid;
+	grid-template-columns: repeat(4, 1fr);
+	gap: 12px;
+	overflow-y: auto;
+	flex: 1;
+}
+
+.clinks-card {
+	display: flex;
+	flex-direction: column;
+	padding: 12px;
+	border-radius: 14px;
+	background: rgba(255, 255, 255, 0.04);
+	border: 1px solid rgba(255, 255, 255, 0.06);
+	cursor: pointer;
+	transition: all 0.15s ease;
+}
+
+.clinks-card:hover {
+	background: rgba(255, 255, 255, 0.09);
+	transform: translateY(-2px);
+}
+
+.clinks-card-top {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	margin-bottom: 8px;
+}
+
+.clinks-avatar {
+	width: 28px;
+	height: 28px;
+	border-radius: 8px;
+	background: #007aff;
+	color: #ffffff;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	font-size: 13px;
+	font-weight: 700;
+}
+
+.clinks-del-icon {
+	background: transparent;
+	border: none;
+	color: rgba(255, 255, 255, 0.3);
+	cursor: pointer;
+}
+
+.clinks-del-icon:hover {
+	color: #ff453a;
+}
+
+.clinks-title {
+	font-size: 13px;
+	font-weight: 600;
+	color: #ffffff;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.clinks-url {
+	font-size: 11px;
+	color: rgba(255, 255, 255, 0.4);
+	margin-top: 2px;
+}
+
+/* ── Color Picker View ── */
+.ccolor-main-row {
+	display: flex;
+	gap: 16px;
+	width: 100%;
+}
+
+.ccolor-preview-block {
+	width: 160px;
+	height: 120px;
+	border-radius: 16px;
+	display: flex;
+	align-items: flex-end;
+	padding: 10px;
+	position: relative;
+	box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+	overflow: hidden;
+	flex-shrink: 0;
+}
+
+.ccolor-hidden-picker {
+	position: absolute;
+	inset: 0;
+	width: 100%;
+	height: 100%;
+	opacity: 0;
+	cursor: pointer;
+}
+
+.ccolor-preview-label {
+	background: rgba(0, 0, 0, 0.65);
+	backdrop-filter: blur(8px);
+	padding: 3px 8px;
+	border-radius: 6px;
+	font-size: 12px;
+	font-weight: 700;
+	color: #ffffff;
+	font-family: monospace;
+}
+
+.ccolor-values-col {
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+	flex: 1;
+}
+
+.ccolor-val-card {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	padding: 8px 12px;
+	border-radius: 10px;
+	background: rgba(255, 255, 255, 0.04);
+	border: 1px solid rgba(255, 255, 255, 0.06);
+	cursor: pointer;
+	transition: background 0.15s ease;
+}
+
+.ccolor-val-card:hover {
+	background: rgba(255, 255, 255, 0.08);
+}
+
+.ccolor-val-left {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+}
+
+.ccolor-val-type {
+	font-size: 11px;
+	font-weight: 700;
+	color: rgba(255, 255, 255, 0.45);
+	width: 32px;
+}
+
+.ccolor-val-text {
+	font-size: 12.5px;
+	font-family: monospace;
+	font-weight: 500;
+	color: #ffffff;
+}
+
+.ccolor-val-copy {
+	background: transparent;
+	border: none;
+	color: rgba(255, 255, 255, 0.4);
+	cursor: pointer;
+}
+
+.ccolor-section-heading {
+	font-size: 11px;
+	font-weight: 700;
+	color: rgba(255, 255, 255, 0.4);
+	letter-spacing: 0.5px;
+	display: block;
+	margin-bottom: 6px;
+}
+
+.ccolor-swatches-row {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	flex-wrap: wrap;
+}
+
+.ccolor-swatch-circle {
+	width: 26px;
+	height: 26px;
+	border-radius: 50%;
+	border: 2px solid transparent;
+	cursor: pointer;
+	transition: transform 0.15s ease;
+}
+
+.ccolor-swatch-circle:hover {
+	transform: scale(1.15);
+}
+
+.ccolor-swatch-circle.selected {
+	border-color: #ffffff;
+	transform: scale(1.1);
 }

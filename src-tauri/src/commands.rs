@@ -5775,6 +5775,93 @@ pub fn lock_windows_workstation() {
 }
 
 #[tauri::command]
+pub fn trigger_screenshot() {
+    unsafe {
+        use windows::Win32::UI::WindowsAndMessaging::{keybd_event, KEYEVENTF_KEYUP};
+        use windows::Win32::UI::Input::KeyboardAndMouse::{VK_LWIN, VK_SHIFT};
+        const VK_S: u8 = 0x53;
+        keybd_event(VK_LWIN.0 as u8, 0, Default::default(), 0);
+        keybd_event(VK_SHIFT.0 as u8, 0, Default::default(), 0);
+        keybd_event(VK_S, 0, Default::default(), 0);
+        keybd_event(VK_S, 0, KEYEVENTF_KEYUP, 0);
+        keybd_event(VK_SHIFT.0 as u8, 0, KEYEVENTF_KEYUP, 0);
+        keybd_event(VK_LWIN.0 as u8, 0, KEYEVENTF_KEYUP, 0);
+    }
+}
+
+#[tauri::command]
+pub async fn toggle_mic_mute() -> Result<bool, String> {
+    tauri::async_runtime::spawn_blocking(|| unsafe {
+        use windows::Win32::Media::Audio::Endpoints::IAudioEndpointVolume;
+        use windows::Win32::Media::Audio::{eCapture, eConsole, IMMDeviceEnumerator};
+        use windows::Win32::System::Com::{
+            CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_MULTITHREADED,
+        };
+
+        let com_initialized = CoInitializeEx(None, COINIT_MULTITHREADED).is_ok();
+        let result = (|| -> Result<bool, String> {
+            let enumerator: IMMDeviceEnumerator = CoCreateInstance(
+                &windows::Win32::Media::Audio::MMDeviceEnumerator,
+                None,
+                CLSCTX_ALL,
+            )
+            .map_err(|e| e.to_string())?;
+            let device = enumerator
+                .GetDefaultAudioEndpoint(eCapture, eConsole)
+                .map_err(|e| e.to_string())?;
+            let endpoint: IAudioEndpointVolume = device
+                .Activate(CLSCTX_ALL, None)
+                .map_err(|e| e.to_string())?;
+            let is_muted = endpoint.GetMute().map(|m| m.as_bool()).unwrap_or(false);
+            let next_mute = !is_muted;
+            let _ = endpoint.SetMute(next_mute, std::ptr::null());
+            Ok(next_mute)
+        })();
+        if com_initialized {
+            CoUninitialize();
+        }
+        result
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn get_mic_mute_state() -> Result<bool, String> {
+    tauri::async_runtime::spawn_blocking(|| unsafe {
+        use windows::Win32::Media::Audio::Endpoints::IAudioEndpointVolume;
+        use windows::Win32::Media::Audio::{eCapture, eConsole, IMMDeviceEnumerator};
+        use windows::Win32::System::Com::{
+            CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_MULTITHREADED,
+        };
+
+        let com_initialized = CoInitializeEx(None, COINIT_MULTITHREADED).is_ok();
+        let result = (|| -> Result<bool, String> {
+            let enumerator: IMMDeviceEnumerator = CoCreateInstance(
+                &windows::Win32::Media::Audio::MMDeviceEnumerator,
+                None,
+                CLSCTX_ALL,
+            )
+            .map_err(|e| e.to_string())?;
+            let device = enumerator
+                .GetDefaultAudioEndpoint(eCapture, eConsole)
+                .map_err(|e| e.to_string())?;
+            let endpoint: IAudioEndpointVolume = device
+                .Activate(CLSCTX_ALL, None)
+                .map_err(|e| e.to_string())?;
+            let is_muted = endpoint.GetMute().map(|m| m.as_bool()).unwrap_or(false);
+            Ok(is_muted)
+        })();
+        if com_initialized {
+            CoUninitialize();
+        }
+        result
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
 pub async fn open_lockscreen(_app: tauri::AppHandle) -> Result<(), String> {
     // Lockscreen disabled per user request
     Ok(())

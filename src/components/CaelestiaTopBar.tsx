@@ -51,6 +51,7 @@ export function CaelestiaTopBar({
 	const [bluetoothOn, setBluetoothOn] = useState(true);
 	const [wifiOn, setWifiOn] = useState(true);
 	const [isMuted, setIsMuted] = useState(false);
+	const [micMuted, setMicMuted] = useState(false);
 	const [volume, setVolume] = useState(100);
 	const [menuOpen, setMenuOpen] = useState(false);
 	const menuRef = useRef<HTMLDivElement>(null);
@@ -68,6 +69,10 @@ export function CaelestiaTopBar({
 	useEffect(() => {
 		invoke<boolean>("get_bluetooth_state")
 			.then((state) => setBluetoothOn(Boolean(state)))
+			.catch(() => {});
+
+		invoke<boolean>("get_mic_mute_state")
+			.then((m) => setMicMuted(Boolean(m)))
 			.catch(() => {});
 
 		invoke<{ volume?: number; muted?: boolean } | number>("get_volume")
@@ -107,18 +112,40 @@ export function CaelestiaTopBar({
 		}
 	};
 
+	const handleOpenBluetoothSettings = async (e: React.MouseEvent) => {
+		e.preventDefault();
+		try {
+			await invoke("open_bluetooth_settings").catch(() => {});
+		} catch {}
+	};
+
 	// Toggle Wi-Fi
 	const handleToggleWifi = async () => {
 		const next = !wifiOn;
 		setWifiOn(next);
 		try {
-			if (next) {
-				await invoke("wifi_scan").catch(() => {});
-			} else {
-				await invoke("wifi_disconnect").catch(() => {});
-			}
+			await invoke("set_wifi_state", { enabled: next }).catch(() => {});
 		} catch (e) {
 			console.error("Wifi toggle failed:", e);
+		}
+	};
+
+	const handleOpenWifiFlyout = async (e: React.MouseEvent) => {
+		e.preventDefault();
+		try {
+			await invoke("open_wifi_settings").catch(async () => {
+				await invoke("plugin:opener|open_url", { url: "ms-availablenetworks:" }).catch(() => {});
+			});
+		} catch {}
+	};
+
+	// Toggle mic mute
+	const handleToggleMic = async () => {
+		try {
+			const next = await invoke<boolean>("toggle_mic_mute").catch(() => !micMuted);
+			setMicMuted(next);
+		} catch {
+			setMicMuted(!micMuted);
 		}
 	};
 
@@ -148,9 +175,23 @@ export function CaelestiaTopBar({
 	// Trigger screenshot
 	const handleScreenshot = async () => {
 		try {
-			await invoke("plugin:opener|open_url", { url: "ms-screenclip:" }).catch(async () => {
-				await invoke("execute_command", { command: "explorer.exe ms-screenclip:" }).catch(() => {});
+			await invoke("trigger_screenshot").catch(async () => {
+				await invoke("plugin:opener|open_url", { url: "ms-screenclip:" }).catch(async () => {
+					await invoke("execute_command", { command: "explorer.exe ms-screenclip:" }).catch(() => {});
+				});
 			});
+
+			window.dispatchEvent(
+				new CustomEvent("caelestia-add-notification", {
+					detail: {
+						appId: "screenshot",
+						appName: "Captura de pantalla",
+						title: "Herramienta de recorte activa",
+						subtitle: "Selecciona el área para recortar",
+						iconType: "screenshot"
+					}
+				})
+			);
 		} catch (e) {
 			console.error("Screenshot launch failed:", e);
 		}
@@ -347,7 +388,7 @@ export function CaelestiaTopBar({
 				<button
 					type="button"
 					className={`chome-toggle-btn ${isMuted ? "muted" : ""}`}
-					title={`Volumen: ${volume}% (Rueda para cambiar, clic para mezclador)`}
+					title={`Volumen: ${volume}% (Rueda: cambiar, Clic: mezclador, Clic derecho: silenciar)`}
 					onClick={() => onSwitchTab("mixer")}
 					onContextMenu={(e) => {
 						e.preventDefault();
@@ -361,19 +402,21 @@ export function CaelestiaTopBar({
 				{/* Wi-Fi Toggle */}
 				<button
 					type="button"
-					className={`chome-toggle-btn ${wifiOn ? "active-grey" : "off"}`}
-					title={wifiOn ? "Wi-Fi Conectado" : "Wi-Fi Desactivado"}
+					className={`chome-toggle-btn ${wifiOn ? "active-blue" : "off"}`}
+					title={wifiOn ? "Wi-Fi Activado (Clic: apagar, Clic derecho: redes)" : "Wi-Fi Desactivado (Clic: encender)"}
 					onClick={handleToggleWifi}
+					onContextMenu={handleOpenWifiFlyout}
 				>
 					<Wifi size={14} strokeWidth={2.2} />
 				</button>
 
-				{/* Bluetooth Toggle (Blue active circle) */}
+				{/* Bluetooth Toggle */}
 				<button
 					type="button"
 					className={`chome-toggle-btn ${bluetoothOn ? "active-blue" : "off"}`}
-					title={bluetoothOn ? "Bluetooth Activado" : "Bluetooth Desactivado"}
+					title={bluetoothOn ? "Bluetooth Activado (Clic: alternar, Clic derecho: configuración)" : "Bluetooth Desactivado (Clic: encender)"}
 					onClick={handleToggleBluetooth}
+					onContextMenu={handleOpenBluetoothSettings}
 				>
 					<Bluetooth size={14} strokeWidth={2.2} />
 				</button>
@@ -381,18 +424,18 @@ export function CaelestiaTopBar({
 				{/* Mic / DND Toggle */}
 				<button
 					type="button"
-					className="chome-toggle-btn"
-					title="No molestar / Silenciar micrófono"
-					onClick={handleToggleMute}
+					className={`chome-toggle-btn ${micMuted ? "active-red" : ""}`}
+					title={micMuted ? "Micrófono Silenciado (Clic para activar)" : "Micrófono Activo (Clic para silenciar)"}
+					onClick={handleToggleMic}
 				>
-					<MicOff size={14} strokeWidth={2.2} />
+					<MicOff size={14} strokeWidth={2.2} color={micMuted ? "#ff453a" : "currentColor"} />
 				</button>
 
 				{/* Screenshot / Recorte */}
 				<button
 					type="button"
 					className="chome-toggle-btn"
-					title="Captura de pantalla (Recorte)"
+					title="Captura de pantalla (Recorte de Windows)"
 					onClick={handleScreenshot}
 				>
 					<Camera size={14} strokeWidth={2.2} />
@@ -402,7 +445,7 @@ export function CaelestiaTopBar({
 				<button
 					type="button"
 					className="chome-toggle-btn"
-					title="Bloquear pantalla"
+					title="Bloquear pantalla (Win + L)"
 					onClick={handleLock}
 				>
 					<Lock size={14} strokeWidth={2.2} />

@@ -3471,7 +3471,6 @@ function App() {
 			if (bloomMode === "mixer" || bloomMode === "devices" || bloomMode === "audio-output") return 860;
 			if (bloomMode === "notifications") return 860;
 			if (bloomMode === "notes") return 860;
-			if (isCalendarMode) return 680;
 			if (bloomMode === "wifi" || bloomMode === "bluetooth" || bloomMode === "system-tray") return 420;
 			return 860;
 		}

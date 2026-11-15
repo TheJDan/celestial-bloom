@@ -82,7 +82,7 @@ base64 = "0.22"
 tauri-plugin-autostart = "2.5.1"
 tauri-plugin-clipboard-manager = "2"
 # Direct in-app GitHub Release updater using reqwest
-reqwest = { version = "0.13", default-features = false, features = ["rustls-tls", "json"] }
+reqwest = { version = "0.13", features = ["json"] }
 window-vibrancy = "0.7.1"
 wmi = "0.14"
 tokio = { version = "1", features = ["time", "sync"] }

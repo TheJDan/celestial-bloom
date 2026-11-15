@@ -1,178 +1,290 @@
-.spotlight-backdrop {
+/* ══════════════════════════════════════════════════════════════
+   CAELESTIA APPLICATION LAUNCHER (Image 4 - Genuine Caelestia)
+   ══════════════════════════════════════════════════════════════ */
+
+.spotlight-backdrop.caelestia-launcher-backdrop {
 	position: fixed;
 	inset: 0;
 	z-index: 999995;
-	background: rgba(0, 0, 0, 0.42);
-	backdrop-filter: blur(8px);
-	-webkit-backdrop-filter: blur(8px);
+	background: transparent;
 	display: flex;
 	justify-content: center;
-	align-items: flex-start;
-	padding-top: 15vh;
+	align-items: flex-end;
+	padding-bottom: 74px;
 	pointer-events: auto;
 }
 
-.spotlight-panel {
-	width: 480px;
-	max-width: 92vw;
-	height: 520px;
-	max-height: calc(100vh - 80px);
-	background: rgba(14, 15, 19, 0.92);
-	backdrop-filter: blur(32px) saturate(180%);
-	-webkit-backdrop-filter: blur(32px) saturate(180%);
+.caelestia-app-launcher-panel {
+	width: 580px;
+	max-width: 95vw;
+	height: 430px;
+	background: rgba(18, 18, 22, 0.96);
 	border: 1px solid rgba(255, 255, 255, 0.08);
-	box-shadow: 0 24px 60px rgba(0, 0, 0, 0.75), 0 0 1px rgba(255, 255, 255, 0.12);
+	box-shadow: 0 24px 60px rgba(0, 0, 0, 0.8), 0 0 1px rgba(255, 255, 255, 0.12);
 	border-radius: 20px;
 	overflow: hidden;
 	display: flex;
 	flex-direction: column;
-	color: #f1f5f9;
-	font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+	color: #ffffff;
 	user-select: none;
+	font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
 }
 
-.spotlight-results {
+/* ── Body: Categories + Apps ── */
+.clauncher-body {
+	display: flex;
 	flex: 1;
-	overflow-y: auto;
-	padding: 12px 10px 4px 10px;
+	overflow: hidden;
+	padding: 14px 14px 4px 14px;
+	gap: 14px;
+}
+
+.clauncher-sidebar {
+	width: 175px;
 	display: flex;
 	flex-direction: column;
-	gap: 3px;
+	gap: 2px;
+	flex-shrink: 0;
+	overflow-y: auto;
 }
 
-.spotlight-results::-webkit-scrollbar {
-	width: 5px;
-}
-
-.spotlight-results::-webkit-scrollbar-track {
+.clauncher-cat-btn {
+	display: flex;
+	align-items: center;
+	gap: 9px;
+	padding: 6px 10px;
+	border-radius: 8px;
+	border: none;
 	background: transparent;
+	color: rgba(255, 255, 255, 0.65);
+	font-size: 12px;
+	font-weight: 500;
+	cursor: pointer;
+	transition: all 0.12s cubic-bezier(0.16, 1, 0.3, 1);
+	text-align: left;
 }
 
-.spotlight-results::-webkit-scrollbar-thumb {
+.clauncher-cat-btn:hover {
+	background: rgba(255, 255, 255, 0.06);
+	color: #ffffff;
+}
+
+.clauncher-cat-btn.active {
+	background: rgba(255, 255, 255, 0.12);
+	color: #ffffff;
+	font-weight: 600;
+}
+
+.clauncher-cat-icon {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	width: 16px;
+	color: inherit;
+}
+
+.clauncher-cat-label {
+	flex: 1;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+/* ── Grid Container ── */
+.clauncher-grid-wrap {
+	flex: 1;
+	overflow-y: auto;
+	padding: 2px 4px 2px 2px;
+}
+
+.clauncher-grid-wrap::-webkit-scrollbar {
+	width: 4px;
+}
+
+.clauncher-grid-wrap::-webkit-scrollbar-thumb {
 	background: rgba(255, 255, 255, 0.14);
 	border-radius: 4px;
 }
 
-.spotlight-results::-webkit-scrollbar-thumb:hover {
-	background: rgba(255, 255, 255, 0.25);
+.clauncher-tiles-grid {
+	display: grid;
+	grid-template-columns: repeat(auto-fill, minmax(72px, 1fr));
+	gap: 12px;
+	padding: 4px 2px;
 }
 
-.spotlight-empty {
-	padding: 40px 20px;
-	text-align: center;
-	color: rgba(255, 255, 255, 0.38);
-	font-size: 13.5px;
-}
-
-.spotlight-item {
+.clauncher-app-tile {
 	display: flex;
+	flex-direction: column;
 	align-items: center;
-	padding: 8px 12px;
+	justify-content: center;
+	gap: 6px;
+	padding: 10px 4px 8px 4px;
 	border-radius: 12px;
-	gap: 14px;
 	cursor: pointer;
-	transition: background 0.1s ease;
+	transition: all 0.15s ease;
+	text-align: center;
 }
 
-.spotlight-item.selected,
-.spotlight-item:hover {
-	background: rgba(255, 255, 255, 0.09);
+.clauncher-app-tile:hover {
+	background: rgba(255, 255, 255, 0.08);
+	transform: translateY(-2px);
 }
 
-.spotlight-item-icon {
-	width: 28px;
-	height: 28px;
-	border-radius: 7px;
-	background: rgba(255, 255, 255, 0.04);
-	border: 1px solid rgba(255, 255, 255, 0.06);
+.clauncher-app-tile:active {
+	transform: scale(0.96);
+}
+
+.clauncher-tile-icon-wrap {
+	position: relative;
+	width: 44px;
+	height: 44px;
 	display: flex;
 	align-items: center;
 	justify-content: center;
-	flex-shrink: 0;
-	overflow: hidden;
 }
 
-.spotlight-item-icon img {
-	width: 24px;
-	height: 24px;
+.clauncher-tile-img {
+	width: 40px;
+	height: 40px;
 	object-fit: contain;
 }
 
-.spotlight-item-content {
-	flex: 1;
-	overflow: hidden;
-	display: flex;
-	flex-direction: column;
-	gap: 2px;
+.clauncher-fav-heart {
+	position: absolute;
+	top: -2px;
+	right: -2px;
+	font-size: 10px;
+	color: rgba(255, 255, 255, 0.85);
 }
 
-.spotlight-item-title {
-	font-size: 13.5px;
+.clauncher-tile-name {
+	font-size: 11px;
 	font-weight: 500;
 	color: #ffffff;
 	white-space: nowrap;
 	overflow: hidden;
 	text-overflow: ellipsis;
-	letter-spacing: -0.15px;
+	max-width: 68px;
 }
 
-.spotlight-item-subtitle {
-	font-size: 11px;
-	color: rgba(255, 255, 255, 0.42);
-	white-space: nowrap;
-	overflow: hidden;
-	text-overflow: ellipsis;
-	line-height: 1.3;
+.clauncher-empty {
+	padding: 40px 10px;
+	text-align: center;
+	color: rgba(255, 255, 255, 0.35);
+	font-size: 12px;
 }
 
-/* Bottom search bar */
-.spotlight-input-wrapper.caelestia-search-bar {
-	margin: 8px 12px 14px 12px;
-	padding: 10px 14px;
-	background: rgba(255, 255, 255, 0.05);
-	border: 1px solid rgba(255, 255, 255, 0.08);
-	border-radius: 12px;
+/* ── Command Mode List ── */
+.clauncher-cmd-list {
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+}
+
+.clauncher-cmd-item {
 	display: flex;
 	align-items: center;
 	gap: 10px;
+	padding: 8px 10px;
+	border-radius: 8px;
+	cursor: pointer;
+	transition: background 0.12s ease;
 }
 
-.spotlight-search-icon {
+.clauncher-cmd-item:hover {
+	background: rgba(255, 255, 255, 0.08);
+}
+
+.clauncher-cmd-icon {
+	width: 28px;
+	height: 28px;
+	border-radius: 6px;
+	background: rgba(255, 255, 255, 0.05);
+	display: flex;
+	align-items: center;
+	justify-content: center;
+}
+
+.clauncher-cmd-meta {
+	flex: 1;
+	display: flex;
+	flex-direction: column;
+}
+
+.clauncher-cmd-title {
+	font-size: 12.5px;
+	font-weight: 500;
+	color: #ffffff;
+}
+
+.clauncher-cmd-sub {
+	font-size: 10.5px;
+	color: rgba(255, 255, 255, 0.4);
+}
+
+/* ── Power Buttons Row (Image 4) ── */
+.clauncher-power-row {
+	display: grid;
+	grid-template-columns: repeat(4, 1fr);
+	gap: 8px;
+	padding: 8px 14px 4px 14px;
+	border-top: 1px solid rgba(255, 255, 255, 0.04);
+}
+
+.clauncher-power-btn {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	gap: 6px;
+	padding: 7px 8px;
+	border-radius: 10px;
+	background: rgba(255, 255, 255, 0.06);
+	border: 1px solid rgba(255, 255, 255, 0.05);
+	color: rgba(255, 255, 255, 0.85);
+	font-size: 11.5px;
+	font-weight: 500;
+	cursor: pointer;
+	transition: all 0.14s ease;
+}
+
+.clauncher-power-btn:hover {
+	background: rgba(255, 255, 255, 0.12);
+	color: #ffffff;
+}
+
+.clauncher-power-btn:active {
+	transform: scale(0.97);
+}
+
+/* ── Bottom Search Bar (Image 4) ── */
+.clauncher-search-bar {
+	margin: 6px 14px 12px 14px;
+	padding: 8px 12px;
+	background: rgba(255, 255, 255, 0.05);
+	border: 1px solid rgba(255, 255, 255, 0.08);
+	border-radius: 10px;
+	display: flex;
+	align-items: center;
+	gap: 8px;
+}
+
+.clauncher-search-icon,
+.clauncher-menu-icon {
 	color: rgba(255, 255, 255, 0.4);
 	flex-shrink: 0;
 }
 
-.spotlight-input {
+.clauncher-search-input {
 	flex: 1;
 	background: transparent;
 	border: none;
 	outline: none;
 	color: #ffffff;
-	font-size: 13.5px;
-	font-weight: 400;
-	letter-spacing: -0.1px;
+	font-size: 12.5px;
+	font-family: inherit;
 }
 
-.spotlight-input::placeholder {
+.clauncher-search-input::placeholder {
 	color: rgba(255, 255, 255, 0.35);
-}
-
-.spotlight-clear-btn {
-	background: rgba(255, 255, 255, 0.1);
-	border: none;
-	width: 20px;
-	height: 20px;
-	border-radius: 50%;
-	color: rgba(255, 255, 255, 0.6);
-	display: flex;
-	align-items: center;
-	justify-content: center;
-	font-size: 10px;
-	cursor: pointer;
-	transition: all 0.15s ease;
-}
-
-.spotlight-clear-btn:hover {
-	background: rgba(255, 255, 255, 0.2);
-	color: #fff;
 }

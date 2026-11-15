@@ -1568,3 +1568,846 @@
 .cmusic-play-pill:active {
 	transform: scale(0.95);
 }
+
+
+/* ══════════════════════════════════════════════════════════════
+   CAELESTIA TOP BAR & TOOL DROPDOWN
+   ══════════════════════════════════════════════════════════════ */
+.chome-tab-divider {
+	width: 1px;
+	height: 14px;
+	background: rgba(255, 255, 255, 0.15);
+	margin: 0 2px;
+}
+
+.chome-tool-dropdown-wrap {
+	position: relative;
+	display: inline-flex;
+}
+
+.ctool-menu-popup {
+	position: absolute;
+	top: 36px;
+	left: 0;
+	background: #181920;
+	border: 1px solid rgba(255, 255, 255, 0.1);
+	border-radius: 12px;
+	padding: 6px;
+	box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+	min-width: 180px;
+	z-index: 100;
+}
+
+.ctool-menu-item {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	padding: 7px 10px;
+	border-radius: 8px;
+	background: transparent;
+	border: none;
+	color: rgba(255, 255, 255, 0.8);
+	font-size: 12.5px;
+	cursor: pointer;
+	text-align: left;
+	transition: background 0.12s ease;
+}
+
+.ctool-menu-item:hover {
+	background: rgba(255, 255, 255, 0.08);
+	color: #ffffff;
+}
+
+.ctool-item-icon.active-icon {
+	color: #38bdf8;
+}
+
+/* ══════════════════════════════════════════════════════════════
+   CAELESTIA PERFORMANCE TAB (Image 5)
+   ══════════════════════════════════════════════════════════════ */
+.cperf-tab-root {
+	width: 100%;
+	height: 100%;
+	display: flex;
+	flex-direction: column;
+}
+
+.cperf-linux-layout {
+	width: 100%;
+	display: flex;
+	flex-direction: column;
+	gap: 12px;
+}
+
+.cperf-top-cards {
+	display: flex;
+	gap: 12px;
+	width: 100%;
+	height: 145px;
+}
+
+.cperf-card-large {
+	flex: 1;
+	background: #1a1a20;
+	border-radius: 16px;
+	padding: 14px 16px;
+	display: flex;
+	flex-direction: column;
+	justify-content: space-between;
+	border: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.cperf-card-header {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	width: 100%;
+}
+
+.cperf-icon-box {
+	width: 28px;
+	height: 28px;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+}
+
+.cperf-meta-col {
+	display: flex;
+	flex-direction: column;
+	flex: 1;
+	overflow: hidden;
+}
+
+.cperf-label-title {
+	font-size: 13.5px;
+	font-weight: 700;
+	color: #ffffff;
+}
+
+.cperf-label-sub {
+	font-size: 11px;
+	color: rgba(255, 255, 255, 0.45);
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	max-width: 240px;
+}
+
+.cperf-badge-pill {
+	background: #111115;
+	color: #ffffff;
+	font-size: 12px;
+	font-weight: 700;
+	padding: 4px 12px;
+	border-radius: 8px;
+	border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.cperf-card-middle {
+	display: flex;
+	justify-content: space-between;
+	align-items: center;
+	font-size: 11.5px;
+	color: rgba(255, 255, 255, 0.5);
+}
+
+.cperf-temp-row {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	font-size: 11.5px;
+	color: rgba(255, 255, 255, 0.5);
+}
+
+.cperf-usage-sub {
+	font-size: 11.5px;
+	color: rgba(255, 255, 255, 0.5);
+}
+
+.cperf-gpu-dual-block {
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+}
+
+.cperf-gpu-row {
+	display: flex;
+	justify-content: space-between;
+	align-items: center;
+	font-size: 11px;
+}
+
+.cperf-progress-track {
+	width: 100%;
+	height: 6px;
+	background: #121216;
+	border-radius: 3px;
+	overflow: hidden;
+	position: relative;
+}
+
+.cperf-progress-track.thin {
+	height: 5px;
+}
+
+.cperf-progress-track.small {
+	height: 5px;
+	margin: 6px 0;
+}
+
+.cperf-progress-fill.blue {
+	height: 100%;
+	background: #007aff;
+	border-radius: 3px;
+	transition: width 0.3s ease;
+}
+
+.cperf-progress-fill.purple {
+	height: 100%;
+	background: #bf5af2;
+	border-radius: 3px;
+	transition: width 0.3s ease;
+}
+
+.cperf-progress-fill.green {
+	height: 100%;
+	background: #30d158;
+	border-radius: 3px;
+	transition: width 0.3s ease;
+}
+
+.cperf-progress-fill.grey {
+	height: 100%;
+	background: rgba(255, 255, 255, 0.4);
+	border-radius: 3px;
+	transition: width 0.3s ease;
+}
+
+.cperf-progress-fill.red {
+	height: 100%;
+	background: #ff453a;
+	border-radius: 3px;
+	transition: width 0.3s ease;
+}
+
+.cperf-bottom-cards {
+	display: grid;
+	grid-template-columns: repeat(4, 1fr);
+	gap: 12px;
+	width: 100%;
+	height: 155px;
+}
+
+.cperf-card-small {
+	background: #1a1a20;
+	border-radius: 16px;
+	padding: 12px 14px;
+	border: 1px solid rgba(255, 255, 255, 0.05);
+	display: flex;
+	flex-direction: column;
+	justify-content: space-between;
+}
+
+.cperf-small-header {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	font-size: 12px;
+	font-weight: 700;
+	color: #ffffff;
+}
+
+.cperf-small-val {
+	font-size: 16px;
+	font-weight: 700;
+	color: #ffffff;
+	margin-top: 4px;
+}
+
+.cperf-small-val.net {
+	font-size: 13.5px;
+	margin-top: 2px;
+}
+
+.cperf-small-sub {
+	font-size: 10.5px;
+	color: rgba(255, 255, 255, 0.45);
+	margin-top: 1px;
+}
+
+.cperf-small-foot {
+	font-size: 10.5px;
+	color: rgba(255, 255, 255, 0.4);
+}
+
+/* ══════════════════════════════════════════════════════════════
+   CAELESTIA MIXER TAB (Image 6)
+   ══════════════════════════════════════════════════════════════ */
+.cmixer-tab-root {
+	width: 100%;
+	height: 100%;
+	display: flex;
+	flex-direction: column;
+}
+
+.cmixer-layout {
+	display: flex;
+	gap: 28px;
+	width: 100%;
+	flex: 1;
+}
+
+.cmixer-left-col {
+	width: 330px;
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+	flex-shrink: 0;
+}
+
+.cmixer-section-heading {
+	font-size: 11.5px;
+	font-weight: 700;
+	color: rgba(255, 255, 255, 0.45);
+	letter-spacing: 0.5px;
+}
+
+.cmixer-device-pills {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 6px;
+	margin: 2px 0 6px 0;
+}
+
+.cmixer-pill-btn {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	padding: 6px 14px;
+	border-radius: 999px;
+	background: rgba(255, 255, 255, 0.08);
+	border: 1px solid rgba(255, 255, 255, 0.06);
+	color: rgba(255, 255, 255, 0.85);
+	font-size: 11.5px;
+	font-weight: 500;
+	cursor: pointer;
+	transition: all 0.15s ease;
+}
+
+.cmixer-pill-btn:hover {
+	background: rgba(255, 255, 255, 0.14);
+	color: #ffffff;
+}
+
+.cmixer-pill-btn.selected {
+	background: #ffffff;
+	color: #000000;
+	border-color: #ffffff;
+	font-weight: 600;
+	box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+}
+
+.cmixer-pill-btn.selected .cmixer-pill-icon {
+	color: #000000;
+}
+
+.cmixer-pill-icon {
+	color: rgba(255, 255, 255, 0.7);
+}
+
+.cmixer-slider-row {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	width: 100%;
+	margin-top: 4px;
+}
+
+.cmixer-slider-icon {
+	color: rgba(255, 255, 255, 0.6);
+	flex-shrink: 0;
+}
+
+.cmixer-track-wrap {
+	flex: 1;
+	height: 5px;
+	background: #23232c;
+	border-radius: 999px;
+	position: relative;
+	display: flex;
+	align-items: center;
+}
+
+.cmixer-track-wrap.app-track {
+	max-width: 180px;
+}
+
+.cmixer-track-fill {
+	height: 100%;
+	background: #007aff;
+	border-radius: 999px;
+	pointer-events: none;
+}
+
+.cmixer-thumb {
+	position: absolute;
+	width: 14px;
+	height: 14px;
+	border-radius: 50%;
+	background: #ffffff;
+	box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
+	pointer-events: none;
+}
+
+.cmixer-range-input {
+	position: absolute;
+	width: 100%;
+	height: 100%;
+	opacity: 0;
+	cursor: pointer;
+	margin: 0;
+}
+
+.cmixer-pct-text {
+	font-size: 11.5px;
+	color: rgba(255, 255, 255, 0.6);
+	min-width: 34px;
+	text-align: right;
+}
+
+.cmixer-vu-track {
+	width: calc(100% - 60px);
+	height: 3px;
+	background: #23232c;
+	border-radius: 1.5px;
+	margin-left: 25px;
+	margin-top: 2px;
+	overflow: hidden;
+}
+
+.cmixer-vu-fill {
+	height: 100%;
+	background: #4ade80;
+	border-radius: 1.5px;
+	transition: width 0.1s ease;
+}
+
+.cmixer-right-col {
+	flex: 1;
+	display: flex;
+	flex-direction: column;
+	gap: 10px;
+}
+
+.cmixer-apps-header {
+	display: flex;
+	justify-content: space-between;
+	align-items: center;
+}
+
+.cmixer-reset-link {
+	background: transparent;
+	border: none;
+	color: #007aff;
+	font-size: 12px;
+	font-weight: 500;
+	cursor: pointer;
+}
+
+.cmixer-reset-link:hover {
+	text-decoration: underline;
+}
+
+.cmixer-apps-list {
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+}
+
+.cmixer-app-row {
+	display: flex;
+	align-items: center;
+	gap: 12px;
+	height: 38px;
+	width: 100%;
+}
+
+.cmixer-app-icon-box {
+	width: 28px;
+	height: 28px;
+	border-radius: 6px;
+	background: rgba(255, 255, 255, 0.08);
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	font-size: 13px;
+}
+
+.cmixer-app-info {
+	width: 140px;
+	display: flex;
+	flex-direction: column;
+	overflow: hidden;
+}
+
+.cmixer-app-name {
+	font-size: 12.5px;
+	font-weight: 600;
+	color: #ffffff;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.cmixer-app-sub {
+	font-size: 10.5px;
+	color: rgba(255, 255, 255, 0.4);
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.cmixer-app-mute-btn {
+	background: transparent;
+	border: none;
+	color: rgba(255, 255, 255, 0.6);
+	cursor: pointer;
+	padding: 4px;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+}
+
+.cmixer-app-mute-btn:hover {
+	color: #ffffff;
+}
+
+/* ══════════════════════════════════════════════════════════════
+   CAELESTIA NOTIFICATIONS TAB (Image 7)
+   ══════════════════════════════════════════════════════════════ */
+.cnotif-tab-root {
+	width: 100%;
+	height: 100%;
+	display: flex;
+	flex-direction: column;
+}
+
+.cnotif-layout {
+	display: flex;
+	flex-direction: column;
+	width: 100%;
+	flex: 1;
+}
+
+.cnotif-header-row {
+	display: flex;
+	justify-content: space-between;
+	align-items: center;
+	width: 100%;
+	margin-bottom: 12px;
+}
+
+.cnotif-header-title-wrap {
+	display: flex;
+	align-items: baseline;
+	gap: 10px;
+}
+
+.cnotif-title-main {
+	font-size: 15px;
+	font-weight: 700;
+	color: #ffffff;
+}
+
+.cnotif-title-count {
+	font-size: 12px;
+	color: rgba(255, 255, 255, 0.45);
+}
+
+.cnotif-clear-btn {
+	background: rgba(255, 255, 255, 0.06);
+	border: none;
+	padding: 5px 12px;
+	border-radius: 6px;
+	color: rgba(255, 255, 255, 0.6);
+	font-size: 12px;
+	cursor: pointer;
+	transition: all 0.15s ease;
+}
+
+.cnotif-clear-btn:hover {
+	background: rgba(255, 255, 255, 0.12);
+	color: #ffffff;
+}
+
+.cnotif-cards-grid {
+	display: grid;
+	grid-template-columns: repeat(2, 1fr);
+	gap: 12px;
+	width: 100%;
+}
+
+.cnotif-group-card {
+	background: #181920;
+	border-radius: 16px;
+	padding: 12px 14px;
+	border: 1px solid rgba(255, 255, 255, 0.05);
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+}
+
+.cnotif-card-head {
+	display: flex;
+	justify-content: space-between;
+	align-items: center;
+	width: 100%;
+}
+
+.cnotif-card-app-info {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	color: rgba(255, 255, 255, 0.85);
+	font-size: 12px;
+	font-weight: 600;
+}
+
+.cnotif-card-badge {
+	font-size: 11px;
+	color: rgba(255, 255, 255, 0.4);
+}
+
+.cnotif-items-list {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+}
+
+.cnotif-item-row {
+	display: flex;
+	align-items: flex-start;
+	gap: 8px;
+	width: 100%;
+	padding: 4px 0;
+}
+
+.cnotif-bullet-wrap {
+	width: 8px;
+	height: 16px;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+}
+
+.cnotif-orange-dot {
+	width: 6px;
+	height: 6px;
+	border-radius: 50%;
+	background: #ff9500;
+	display: inline-block;
+}
+
+.cnotif-item-body {
+	flex: 1;
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+}
+
+.cnotif-item-headline {
+	display: flex;
+	justify-content: space-between;
+	align-items: center;
+	width: 100%;
+}
+
+.cnotif-item-title {
+	font-size: 12.5px;
+	font-weight: 600;
+	color: #ffffff;
+}
+
+.cnotif-item-time {
+	font-size: 11px;
+	color: rgba(255, 255, 255, 0.4);
+}
+
+.cnotif-item-sub {
+	font-size: 11px;
+	color: rgba(255, 255, 255, 0.45);
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	max-width: 260px;
+}
+
+.cnotif-empty-state {
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	justify-content: center;
+	gap: 8px;
+	flex: 1;
+	padding: 40px 0;
+}
+
+.cnotif-empty-title {
+	font-size: 14px;
+	font-weight: 600;
+	color: #ffffff;
+}
+
+.cnotif-empty-sub {
+	font-size: 12px;
+	color: rgba(255, 255, 255, 0.4);
+}
+
+/* ══════════════════════════════════════════════════════════════
+   CAELESTIA NOTES TAB (Image 8)
+   ══════════════════════════════════════════════════════════════ */
+.cnotes-tab-root {
+	width: 100%;
+	height: 100%;
+	display: flex;
+	flex-direction: column;
+}
+
+.cnotes-layout {
+	display: flex;
+	gap: 16px;
+	width: 100%;
+	flex: 1;
+}
+
+.cnotes-sidebar {
+	width: 220px;
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+	flex-shrink: 0;
+}
+
+.cnotes-sidebar-header {
+	display: flex;
+	justify-content: space-between;
+	align-items: center;
+}
+
+.cnotes-heading {
+	font-size: 11.5px;
+	font-weight: 700;
+	color: rgba(255, 255, 255, 0.45);
+	letter-spacing: 0.5px;
+}
+
+.cnotes-new-btn {
+	background: transparent;
+	border: none;
+	color: #007aff;
+	font-size: 12px;
+	font-weight: 600;
+	cursor: pointer;
+}
+
+.cnotes-list {
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+	overflow-y: auto;
+	flex: 1;
+}
+
+.cnotes-item-card {
+	padding: 8px 10px;
+	border-radius: 10px;
+	background: rgba(255, 255, 255, 0.04);
+	cursor: pointer;
+	transition: all 0.15s ease;
+	position: relative;
+}
+
+.cnotes-item-card:hover {
+	background: rgba(255, 255, 255, 0.08);
+}
+
+.cnotes-item-card.selected {
+	background: rgba(255, 255, 255, 0.12);
+}
+
+.cnotes-item-title {
+	font-size: 12px;
+	font-weight: 600;
+	color: #ffffff;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	max-width: 170px;
+}
+
+.cnotes-item-preview {
+	font-size: 10.5px;
+	color: rgba(255, 255, 255, 0.45);
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	max-width: 170px;
+}
+
+.cnotes-delete-btn {
+	position: absolute;
+	right: 8px;
+	top: 10px;
+	background: transparent;
+	border: none;
+	color: rgba(255, 255, 255, 0.3);
+	cursor: pointer;
+	opacity: 0;
+	transition: opacity 0.15s ease;
+}
+
+.cnotes-item-card:hover .cnotes-delete-btn {
+	opacity: 1;
+}
+
+.cnotes-delete-btn:hover {
+	color: #ff453a;
+}
+
+.cnotes-editor-wrap {
+	flex: 1;
+	display: flex;
+	flex-direction: column;
+	background: #181920;
+	border-radius: 16px;
+	border: 1px solid rgba(255, 255, 255, 0.06);
+	padding: 14px;
+	position: relative;
+}
+
+.cnotes-textarea {
+	flex: 1;
+	background: transparent;
+	border: none;
+	outline: none;
+	resize: none;
+	color: #ffffff;
+	font-size: 13.5px;
+	line-height: 1.5;
+	font-family: inherit;
+}
+
+.cnotes-status-row {
+	display: flex;
+	justify-content: space-between;
+	align-items: center;
+	font-size: 11px;
+	color: rgba(255, 255, 255, 0.4);
+	border-top: 1px solid rgba(255, 255, 255, 0.05);
+	padding-top: 8px;
+	margin-top: 6px;
+}

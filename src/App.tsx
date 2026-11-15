@@ -81,6 +81,10 @@ import { DeskBoxHub } from "./components/DeskBoxHub";
 import { CaelestiaDashboard } from "./components/CaelestiaDashboard";
 import { CaelestiaCommandCenter } from "./components/CaelestiaCommandCenter";
 import { CaelestiaPerformance } from "./components/CaelestiaPerformance";
+import { CaelestiaPerformanceTab } from "./components/CaelestiaPerformanceTab";
+import { CaelestiaMixerTab } from "./components/CaelestiaMixerTab";
+import { CaelestiaNotificationsTab } from "./components/CaelestiaNotificationsTab";
+import { CaelestiaNotesTab } from "./components/CaelestiaNotesTab";
 import { CaelestiaWeatherTab } from "./components/CaelestiaWeatherTab";
 import "./components/CaelestiaTabs.css";
 import { WifiPanel } from "./components/WifiPanel";
@@ -512,10 +516,15 @@ interface ShelfItem {
 }
 
 type BloomMode =
+	| "home"
 	| "music"
 	| "calendar"
 	| "command-center"
 	| "optimizer"
+	| "perf"
+	| "mixer"
+	| "notifications"
+	| "notes"
 	| "announcement"
 	| "status"
 	| "shelf"
@@ -1035,8 +1044,6 @@ function App() {
 	const [isOverlapped, setIsOverlapped] = useState(false);
 	const [interactionState, setInteractionState] = useState<"active" | "grace" | "none">("none");
 	const bloomRef = useRef<HTMLDivElement>(null);
-	const leftPillRef = useRef<HTMLDivElement>(null);
-	const rightPillRef = useRef<HTMLDivElement>(null);
 	const [workspaces, setWorkspaces] = useState<WorkspaceState[]>([]);
 	// Measured to fit the hovered status strip; see statusFitWidth.
 	const leftWidgetsRef = useRef<HTMLDivElement>(null);
@@ -1126,11 +1133,9 @@ function App() {
 	useEffect(() => {
 		const updateRect = () => {
 			if (bloomRef.current && windowLabel === "main") {
-				// Caelestia 3-zone hit-test: logical CSS pixels
+				// Hit-test: logical CSS pixels for the island & bubbles
 				const hitElements = [
-					leftPillRef.current,
 					bloomRef.current,
-					rightPillRef.current,
 					musicBubbleRef.current,
 					shelfBubbleRef.current
 				].filter((el): el is HTMLDivElement | HTMLButtonElement => el !== null);
@@ -1172,9 +1177,7 @@ function App() {
 		updateRect();
 		window.addEventListener("resize", updateRect);
 		const observer = new ResizeObserver(updateRect);
-		if (leftPillRef.current) observer.observe(leftPillRef.current);
 		if (bloomRef.current) observer.observe(bloomRef.current);
-		if (rightPillRef.current) observer.observe(rightPillRef.current);
 
 		return () => {
 			window.removeEventListener("resize", updateRect);
@@ -3462,12 +3465,15 @@ function App() {
 		if (bloomMode === "device" && deviceAlert) return 330;
 		if (bloomMode === "shelf") return shelfViewMode === "deskbox" || shelfItems.length === 0 ? 410 : 380;
 		if (isOpen) {
-			if (bloomMode === "optimizer") return 680;
 			if (bloomMode === "music" || isMusicMode) return 860;
+			if (bloomMode === "command-center" || (bloomMode as string) === "home") return 860;
+			if (bloomMode === "perf" || bloomMode === "optimizer") return 860;
+			if (bloomMode === "mixer" || bloomMode === "devices" || bloomMode === "audio-output") return 860;
+			if (bloomMode === "notifications") return 860;
+			if (bloomMode === "notes") return 860;
 			if (isCalendarMode) return 680;
-			if (bloomMode === "command-center") return 860;
-			if (bloomMode === "wifi" || bloomMode === "bluetooth" || bloomMode === "system-tray" || bloomMode === "audio-output") return 420;
-			if (bloomMode === "devices") return 350;
+			if (bloomMode === "wifi" || bloomMode === "bluetooth" || bloomMode === "system-tray") return 420;
+			return 860;
 		}
 
 		// When notch is closed / resting in status pill mode
@@ -3541,16 +3547,15 @@ function App() {
 			if (shelfViewMode === "deskbox" || shelfItems.length === 0) return 245;
 			return shelfOverflowing ? 190 : 176;
 		}
-		if (bloomMode === "optimizer") return isOpen ? 450 : 36;
-		if (bloomMode === "command-center") return isOpen ? 420 : 36;
-		if (bloomMode === "devices") {
-			return isOpen ? devicesPanelHeight : 36;
-		}
-		if (bloomMode === "wifi" || bloomMode === "bluetooth") return isOpen ? 380 : 36;
-		if (bloomMode === "system-tray") return isOpen ? 380 : 36;
-		if (bloomMode === "audio-output") return isOpen ? 340 : 36;
-		if (bloomMode === "status") return 36;
-		if ((isMusicMode || bloomMode === "music") && isOpen) {
+		if (isOpen) {
+			if (bloomMode === "command-center" || (bloomMode as string) === "home") return 420;
+			if (bloomMode === "music" || isMusicMode) return 420;
+			if (bloomMode === "perf" || bloomMode === "optimizer") return 420;
+			if (bloomMode === "mixer" || bloomMode === "devices" || bloomMode === "audio-output") return 420;
+			if (bloomMode === "notifications") return 420;
+			if (bloomMode === "notes") return 420;
+			if (bloomMode === "calendar") return 340;
+			if (bloomMode === "wifi" || bloomMode === "bluetooth" || bloomMode === "system-tray") return 380;
 			return 420;
 		}
 		return 36;
@@ -3630,29 +3635,6 @@ function App() {
 					position: "relative"
 				}}
 			>
-				{/* BLOQUE IZQUIERDO: Workspaces de GlazeWM */}
-				<div
-					ref={leftPillRef}
-					className="caelestia-pill"
-					style={{
-						position: "absolute",
-						left: 12,
-						top: 6
-					}}
-				>
-					{workspaces.length > 0 ? (
-						workspaces.map((ws) => (
-							<button
-								key={ws.name}
-								className={`ws-dot ${ws.hasFocus ? "active" : ""}`}
-								style={{ width: ws.hasFocus ? 26 : 8 }}
-								title={ws.displayName || ws.name}
-							/>
-						))
-					) : (
-						<span style={{ fontSize: 12, opacity: 0.8, fontFamily: "monospace" }}>WS 1</span>
-					)}
-				</div>
 				<DeviceArtDefs />
 				<motion.div
 					ref={bloomRef}
@@ -3763,126 +3745,10 @@ function App() {
 									overflow: "hidden"
 								}}
 							>
-								{/* Caelestia Tab Header when expanded into secondary tool views */}
-								{isOpen && bloomMode !== "announcement" && bloomMode !== "device" && bloomMode !== "command-center" && bloomMode !== "music" && (
-									<motion.div
-										key="caelestia-tabs-nav"
-										className="caelestia-tabs-nav"
-										onClick={(e) => e.stopPropagation()}
-										initial={{ opacity: 0, y: -4 }}
-										animate={{ opacity: 1, y: 0 }}
-										transition={{ duration: 0.15 }}
-									>
-										<button
-											type="button"
-											className={`caelestia-tab ${(bloomMode as string) === "command-center" ? "active" : ""}`}
-											onClick={() => setBloomMode("command-center")}
-										>
-											<LayoutGrid size={12} strokeWidth={2.2} />
-											<span>Dashboard</span>
-										</button>
-										<button
-											type="button"
-											className={`caelestia-tab ${bloomMode === "devices" || bloomMode === "wifi" || bloomMode === "bluetooth" || bloomMode === "system-tray" || bloomMode === "audio-output" ? "active" : ""}`}
-											onClick={() => setBloomMode("devices")}
-										>
-											<Sliders size={12} strokeWidth={2.2} />
-											<span>Controles</span>
-										</button>
-										<button
-											type="button"
-											className={`caelestia-tab ${(bloomMode as string) === "music" ? "active" : ""}`}
-											onClick={() => setBloomMode("music")}
-										>
-											<Music size={12} strokeWidth={2.2} />
-											<span>Media</span>
-										</button>
-										<button
-											type="button"
-											className={`caelestia-tab ${bloomMode === "optimizer" ? "active" : ""}`}
-											onClick={() => setBloomMode("optimizer")}
-										>
-											<Zap size={12} strokeWidth={2.2} />
-											<span>Performance</span>
-										</button>
-										<button
-											type="button"
-											className={`caelestia-tab ${bloomMode === "calendar" ? "active" : ""}`}
-											onClick={() => setBloomMode("calendar")}
-										>
-											<CloudSun size={12} strokeWidth={2.2} />
-											<span>Weather</span>
-										</button>
-									</motion.div>
-								)}
-
 								{/* Faster Waiting Transition Area */}
 								<AnimatePresence mode="wait">
 									{isOpen ? (
-										bloomMode === "command-center" ? (
-											<motion.div
-												key="caelestia-default-dash"
-												initial={{ opacity: 0, scale: 0.98 }}
-												animate={{ opacity: 1, scale: 1 }}
-												exit={{ opacity: 0, scale: 0.98 }}
-												transition={{ duration: 0.15 }}
-												style={{ width: "100%", height: "100%" }}
-											>
-												<CaelestiaDashboard
-													mediaInfo={mediaInfo}
-													temperature={temperature}
-													weatherCondition={weatherCondition}
-													cityName={cityName}
-													onTogglePlayPause={togglePlayPause}
-													onNext={animateNext}
-													onPrev={animatePrev}
-													onSwitchTab={(t) => setBloomMode(t as any)}
-												/>
-											</motion.div>
-										) : bloomMode === "devices" || bloomMode === "wifi" || bloomMode === "bluetooth" || bloomMode === "system-tray" || bloomMode === "audio-output" ? (
-											<motion.div
-												key="caelestia-command-center"
-												initial={{ opacity: 0, scale: 0.98 }}
-												animate={{ opacity: 1, scale: 1 }}
-												exit={{ opacity: 0, scale: 0.98 }}
-												transition={{ duration: 0.15 }}
-												style={{ width: "100%", height: "100%" }}
-											>
-												<CaelestiaCommandCenter
-													volume={displayVolume}
-													onVolumeChange={handleVolumeChange}
-													brightness={currentBrightness / 100}
-													onBrightnessChange={(b) => handleBrightnessChange(Math.round(b * 100))}
-												/>
-											</motion.div>
-										) : bloomMode === "optimizer" ? (
-											<motion.div
-												key="caelestia-performance"
-												initial={{ opacity: 0, scale: 0.98 }}
-												animate={{ opacity: 1, scale: 1 }}
-												exit={{ opacity: 0, scale: 0.98 }}
-												transition={{ duration: 0.15 }}
-												style={{ width: "100%", height: "100%" }}
-											>
-												<CaelestiaPerformance />
-											</motion.div>
-										) : bloomMode === "calendar" ? (
-											<motion.div
-												key="caelestia-weather"
-												initial={{ opacity: 0, scale: 0.98 }}
-												animate={{ opacity: 1, scale: 1 }}
-												exit={{ opacity: 0, scale: 0.98 }}
-												transition={{ duration: 0.15 }}
-												style={{ width: "100%", height: "100%" }}
-											>
-												<CaelestiaWeatherTab
-													temperature={temperature}
-													weatherCondition={weatherCondition}
-													cityName={cityName}
-													tempUnit={tempUnit}
-												/>
-											</motion.div>
-										) : bloomMode === "music" || isMusicMode ? (
+										bloomMode === "music" || isMusicMode ? (
 											<motion.div
 												key="expanded-music"
 												className="expanded-music-container"
@@ -3903,6 +3769,50 @@ function App() {
 													onNext={animateNext}
 													onSwitchTab={(t) => setBloomMode(t as any)}
 												/>
+											</motion.div>
+										) : bloomMode === "perf" || bloomMode === "optimizer" ? (
+											<motion.div
+												key="caelestia-perf"
+												initial={{ opacity: 0, scale: 0.98 }}
+												animate={{ opacity: 1, scale: 1 }}
+												exit={{ opacity: 0, scale: 0.98 }}
+												transition={{ duration: 0.15 }}
+												style={{ width: "100%", height: "100%" }}
+											>
+												<CaelestiaPerformanceTab onSwitchTab={(t) => setBloomMode(t as any)} />
+											</motion.div>
+										) : bloomMode === "mixer" || bloomMode === "devices" || bloomMode === "audio-output" ? (
+											<motion.div
+												key="caelestia-mixer"
+												initial={{ opacity: 0, scale: 0.98 }}
+												animate={{ opacity: 1, scale: 1 }}
+												exit={{ opacity: 0, scale: 0.98 }}
+												transition={{ duration: 0.15 }}
+												style={{ width: "100%", height: "100%" }}
+											>
+												<CaelestiaMixerTab onSwitchTab={(t) => setBloomMode(t as any)} />
+											</motion.div>
+										) : bloomMode === "notifications" ? (
+											<motion.div
+												key="caelestia-notifications"
+												initial={{ opacity: 0, scale: 0.98 }}
+												animate={{ opacity: 1, scale: 1 }}
+												exit={{ opacity: 0, scale: 0.98 }}
+												transition={{ duration: 0.15 }}
+												style={{ width: "100%", height: "100%" }}
+											>
+												<CaelestiaNotificationsTab onSwitchTab={(t) => setBloomMode(t as any)} />
+											</motion.div>
+										) : bloomMode === "notes" ? (
+											<motion.div
+												key="caelestia-notes"
+												initial={{ opacity: 0, scale: 0.98 }}
+												animate={{ opacity: 1, scale: 1 }}
+												exit={{ opacity: 0, scale: 0.98 }}
+												transition={{ duration: 0.15 }}
+												style={{ width: "100%", height: "100%" }}
+											>
+												<CaelestiaNotesTab onSwitchTab={(t) => setBloomMode(t as any)} />
 											</motion.div>
 										) : (
 											<motion.div
@@ -4706,23 +4616,6 @@ function App() {
 						</motion.button>
 					)}
 				</AnimatePresence>
-
-				{/* BLOQUE DERECHO: Estado, Batería y Reloj */}
-				<div
-					ref={rightPillRef}
-					className="caelestia-pill"
-					style={{
-						position: "absolute",
-						right: 12,
-						top: 6,
-						fontFamily: "monospace",
-						fontSize: 12,
-						gap: 10
-					}}
-				>
-					{batteryDetails && batteryDetails.percent !== null ? <span>{batteryDetails.percent}%</span> : null}
-					<span>{time}</span>
-				</div>
 			</div>
 		</div>
 	);

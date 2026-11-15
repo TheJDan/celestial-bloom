@@ -3698,27 +3698,7 @@ img {
 	font-family: "JetBrainsMono Nerd Font", "Segoe UI Variable Display", -apple-system, sans-serif;
 }
 
-.caelestia-pill {
-	pointer-events: auto;
-	height: 36px;
-	display: flex;
-	align-items: center;
-	gap: 8px;
-	padding: 0 14px;
-	background-color: color-mix(in srgb, var(--md-sys-color-surface, #1e1e2e) 88%, transparent);
-	color: var(--md-sys-color-on-surface, #cdd6f4);
-	border: 1px solid color-mix(in srgb, var(--md-sys-color-outline, #45475a) 40%, transparent);
-	border-radius: 999px;
-	backdrop-filter: blur(16px);
-	-webkit-backdrop-filter: blur(16px);
-	box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
-	transition: background-color 0.3s ease, border-color 0.3s ease, transform 0.2s cubic-bezier(0.22, 1, 0.36, 1);
-	user-select: none;
-}
 
-.caelestia-pill:hover {
-	border-color: color-mix(in srgb, var(--md-sys-color-primary, #cba6f7) 50%, transparent);
-}
 
 .ws-dot {
 	height: 8px;

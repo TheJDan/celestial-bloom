@@ -28,6 +28,7 @@ import {
 	RotateCcw
 } from "lucide-react";
 import { WavySlider } from "./WavySlider";
+import { CaelestiaTopBar, CaelestiaTabKey } from "./CaelestiaTopBar";
 import "./CaelestiaTabs.css";
 
 interface MediaInfo {
@@ -191,118 +192,8 @@ export function CaelestiaDashboard({
 
 	return (
 		<div className="caelestia-home-panel" onClick={(e) => e.stopPropagation()}>
-			{/* ── Top Bar ── */}
-			<div className="chome-top-bar">
-				{/* Left Tabs Pill */}
-				<div className="chome-tabs-pill">
-					<button
-						type="button"
-						className="chome-tab-item active"
-						onClick={() => onSwitchTab?.("command-center")}
-					>
-						<Home size={14} strokeWidth={2.4} />
-						<span>Inicio</span>
-					</button>
-
-					<button
-						type="button"
-						className="chome-tab-item icon-only"
-						title="Media"
-						onClick={() => onSwitchTab?.("music")}
-					>
-						<Play size={13} fill="currentColor" strokeWidth={0} />
-					</button>
-
-					<button
-						type="button"
-						className="chome-tab-item icon-only"
-						title="Reloj / Calendario"
-						onClick={() => onSwitchTab?.("calendar")}
-					>
-						<Clock size={14} strokeWidth={2.2} />
-					</button>
-
-					<button
-						type="button"
-						className="chome-tab-item icon-only"
-						title="Controles"
-						onClick={() => onSwitchTab?.("devices")}
-					>
-						<Sliders size={14} strokeWidth={2.2} />
-					</button>
-
-					<button
-						type="button"
-						className="chome-tab-item icon-only"
-						title="Notificaciones"
-					>
-						<Bell size={14} strokeWidth={2.2} />
-						<span className="chome-badge">15</span>
-					</button>
-
-					<button
-						type="button"
-						className="chome-tab-item icon-only"
-						title="Notas"
-					>
-						<FileText size={14} strokeWidth={2.2} />
-					</button>
-
-					<button
-						type="button"
-						className="chome-tab-item icon-only"
-						title="Portapapeles"
-					>
-						<Clipboard size={14} strokeWidth={2.2} />
-					</button>
-
-					<button
-						type="button"
-						className="chome-tab-item icon-only"
-						title="Más herramientas"
-					>
-						<MoreHorizontal size={14} strokeWidth={2.2} />
-					</button>
-				</div>
-
-				{/* Center Clock */}
-				<div className="chome-center-clock">
-					<span>{timeStr}</span>
-				</div>
-
-				{/* Right Quick Toggles */}
-				<div className="chome-quick-toggles">
-					<button type="button" className="chome-toggle-btn" title="Volumen">
-						<Volume2 size={14} strokeWidth={2.2} />
-					</button>
-					<button type="button" className="chome-toggle-btn" title="Wi-Fi">
-						<Wifi size={14} strokeWidth={2.2} />
-					</button>
-					<button type="button" className="chome-toggle-btn active-blue" title="Bluetooth Activado">
-						<Bluetooth size={14} strokeWidth={2.2} />
-					</button>
-					<button type="button" className="chome-toggle-btn" title="Micrófono">
-						<MicOff size={14} strokeWidth={2.2} />
-					</button>
-					<button type="button" className="chome-toggle-btn active-blue" title="Batería">
-						<BatteryCharging size={14} strokeWidth={2.2} />
-					</button>
-					<button type="button" className="chome-toggle-btn" title="Captura de pantalla">
-						<Camera size={14} strokeWidth={2.2} />
-					</button>
-					<button type="button" className="chome-toggle-btn" title="Bloquear">
-						<Lock size={14} strokeWidth={2.2} />
-					</button>
-					<button
-						type="button"
-						className="chome-toggle-btn"
-						title="Ajustes"
-						onClick={() => onSwitchTab?.("devices")}
-					>
-						<Sliders size={14} strokeWidth={2.2} />
-					</button>
-				</div>
-			</div>
+			{/* ── Authentic Caelestia Top Bar ── */}
+			<CaelestiaTopBar activeTab="home" onSwitchTab={(t) => onSwitchTab?.(t)} />
 
 			{/* ── Main Content: 3 Columns ── */}
 			<div className="chome-columns">

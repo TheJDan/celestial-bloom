@@ -66,6 +66,7 @@ export function CaelestiaNotificationsTab({ onSwitchTab }: CaelestiaNotification
 				}
 				try {
 					localStorage.setItem("caelestia-notifications", JSON.stringify(updated));
+					window.dispatchEvent(new CustomEvent("caelestia-notifications-updated"));
 				} catch {}
 				return updated;
 			});
@@ -81,6 +82,7 @@ export function CaelestiaNotificationsTab({ onSwitchTab }: CaelestiaNotification
 		setGroups([]);
 		try {
 			localStorage.removeItem("caelestia-notifications");
+			window.dispatchEvent(new CustomEvent("caelestia-notifications-updated"));
 		} catch {}
 	};
 

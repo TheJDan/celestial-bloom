@@ -253,8 +253,18 @@ export function initCaelestiaBridge() {
 		if (cmd === "get_audio_output_devices") {
 			return [
 				{
-					id: "razer-blackshark-v2-pro",
-					name: "Razer BlackShark V2 Pro",
+					id: "default-output",
+					name: "Altavoces principales",
+					is_default: true
+				}
+			];
+		}
+
+		if (cmd === "get_audio_input_devices") {
+			return [
+				{
+					id: "default-input",
+					name: "Micrófono principal",
 					is_default: true
 				}
 			];

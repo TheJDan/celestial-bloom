@@ -4754,6 +4754,149 @@ pub async fn get_audio_output_devices() -> Result<Vec<AudioOutputDevice>, String
 }
 
 #[tauri::command]
+pub async fn get_audio_input_devices() -> Result<Vec<AudioOutputDevice>, String> {
+    tauri::async_runtime::spawn_blocking(|| unsafe {
+        use windows::Win32::System::Com::{
+            CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_MULTITHREADED,
+            STGM_READ, CoTaskMemFree,
+        };
+        use windows::Win32::Media::Audio::{
+            eConsole, eCapture, IMMDeviceEnumerator, MMDeviceEnumerator, DEVICE_STATE_ACTIVE,
+        };
+        use windows::Win32::Devices::FunctionDiscovery::PKEY_Device_FriendlyName;
+
+        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+
+        let enumerator: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)
+            .map_err(|e| format!("Failed to create MMDeviceEnumerator: {:?}", e))?;
+
+        let mut default_id_str = String::new();
+        if let Ok(default_dev) = enumerator.GetDefaultAudioEndpoint(eCapture, eConsole) {
+            if let Ok(id) = default_dev.GetId() {
+                default_id_str = windows::core::PCWSTR::from_raw(id.0)
+                    .to_string()
+                    .unwrap_or_default();
+                CoTaskMemFree(Some(id.0 as *const _));
+            }
+        }
+
+        let collection = enumerator
+            .EnumAudioEndpoints(eCapture, DEVICE_STATE_ACTIVE)
+            .map_err(|e| format!("Failed to enum audio endpoints: {:?}", e))?;
+
+        let count = collection.GetCount().unwrap_or(0);
+        let mut devices = Vec::with_capacity(count as usize);
+
+        for i in 0..count {
+            let Ok(device) = collection.Item(i) else { continue; };
+            let Ok(id_raw) = device.GetId() else { continue; };
+            let id_str = windows::core::PCWSTR::from_raw(id_raw.0)
+                .to_string()
+                .unwrap_or_default();
+            CoTaskMemFree(Some(id_raw.0 as *const _));
+
+            let mut friendly_name = String::new();
+            if let Ok(store) = device.OpenPropertyStore(STGM_READ) {
+                if let Ok(prop) = store.GetValue(&PKEY_Device_FriendlyName) {
+                    let ptr = prop.Anonymous.Anonymous.Anonymous.pwszVal.0;
+                    if !ptr.is_null() {
+                        friendly_name = windows::core::PCWSTR::from_raw(ptr)
+                            .to_string()
+                            .unwrap_or_default();
+                    }
+                }
+            }
+            if friendly_name.is_empty() {
+                friendly_name = "Micrófono".to_string();
+            }
+
+            let is_default = !default_id_str.is_empty() && default_id_str == id_str;
+            devices.push(AudioOutputDevice {
+                id: id_str,
+                name: friendly_name,
+                is_default,
+            });
+        }
+
+        CoUninitialize();
+        Ok(devices)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn get_mic_volume() -> Result<f32, String> {
+    tauri::async_runtime::spawn_blocking(|| unsafe {
+        use windows::Win32::Media::Audio::Endpoints::IAudioEndpointVolume;
+        use windows::Win32::Media::Audio::{eCapture, eConsole, IMMDeviceEnumerator};
+        use windows::Win32::System::Com::{
+            CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_MULTITHREADED,
+        };
+
+        let com_initialized = CoInitializeEx(None, COINIT_MULTITHREADED).is_ok();
+        let result = (|| -> Result<f32, String> {
+            let enumerator: IMMDeviceEnumerator = CoCreateInstance(
+                &windows::Win32::Media::Audio::MMDeviceEnumerator,
+                None,
+                CLSCTX_ALL,
+            )
+            .map_err(|e| e.to_string())?;
+            let device = enumerator
+                .GetDefaultAudioEndpoint(eCapture, eConsole)
+                .map_err(|e| e.to_string())?;
+            let endpoint: IAudioEndpointVolume = device
+                .Activate(CLSCTX_ALL, None)
+                .map_err(|e| e.to_string())?;
+            let vol = endpoint.GetMasterVolumeLevelScalar().map_err(|e| e.to_string())?;
+            Ok(vol)
+        })();
+        if com_initialized {
+            CoUninitialize();
+        }
+        result
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn set_mic_volume(volume: f32) -> Result<(), String> {
+    let vol = volume.clamp(0.0, 1.0);
+    tauri::async_runtime::spawn_blocking(move || unsafe {
+        use windows::Win32::Media::Audio::Endpoints::IAudioEndpointVolume;
+        use windows::Win32::Media::Audio::{eCapture, eConsole, IMMDeviceEnumerator};
+        use windows::Win32::System::Com::{
+            CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_MULTITHREADED,
+        };
+
+        let com_initialized = CoInitializeEx(None, COINIT_MULTITHREADED).is_ok();
+        let result = (|| -> Result<(), String> {
+            let enumerator: IMMDeviceEnumerator = CoCreateInstance(
+                &windows::Win32::Media::Audio::MMDeviceEnumerator,
+                None,
+                CLSCTX_ALL,
+            )
+            .map_err(|e| e.to_string())?;
+            let device = enumerator
+                .GetDefaultAudioEndpoint(eCapture, eConsole)
+                .map_err(|e| e.to_string())?;
+            let endpoint: IAudioEndpointVolume = device
+                .Activate(CLSCTX_ALL, None)
+                .map_err(|e| e.to_string())?;
+            let _ = endpoint.SetMasterVolumeLevelScalar(vol, std::ptr::null());
+            Ok(())
+        })();
+        if com_initialized {
+            CoUninitialize();
+        }
+        result
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
 pub async fn set_default_audio_device(device_id: String) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || unsafe {
         use windows::Win32::System::Com::{

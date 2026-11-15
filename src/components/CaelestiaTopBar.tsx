@@ -1,12 +1,13 @@
 import React, { useState, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import {
 	Home,
-	Play,
 	Clock,
 	Sliders,
 	Bell,
 	FileText,
+	MoreHorizontal,
 	Volume2,
 	VolumeX,
 	Wifi,
@@ -14,17 +15,29 @@ import {
 	MicOff,
 	Camera,
 	Lock,
-	MoreHorizontal,
 	ChevronDown,
 	Clipboard,
 	Inbox,
 	Link2,
 	Pipette,
-	Edit3
+	Edit3,
+	RefreshCw,
+	ArrowUpCircle,
+	RotateCw,
+	X,
+	CheckCircle2,
+	AlertCircle
 } from "lucide-react";
 import "./CaelestiaTabs.css";
 
 export type CaelestiaTabKey = "home" | "music" | "perf" | "timer" | "mixer" | "notifications" | "notes";
+
+interface UpdateCheckResult {
+	available: boolean;
+	version?: string;
+	date?: string;
+	body?: string;
+}
 
 interface CaelestiaTopBarProps {
 	activeTab: CaelestiaTabKey;
@@ -37,7 +50,7 @@ interface CaelestiaTopBarProps {
 export function CaelestiaTopBar({
 	activeTab,
 	onSwitchTab,
-	notificationCount = 2,
+	notificationCount = 0,
 	onSelectTool,
 	selectedTool = "notes"
 }: CaelestiaTopBarProps) {
@@ -53,8 +66,70 @@ export function CaelestiaTopBar({
 	const [isMuted, setIsMuted] = useState(false);
 	const [micMuted, setMicMuted] = useState(false);
 	const [volume, setVolume] = useState(100);
+
+	// Tool dropdown menu
 	const [menuOpen, setMenuOpen] = useState(false);
 	const menuRef = useRef<HTMLDivElement>(null);
+
+	// More options menu (...)
+	const [moreMenuOpen, setMoreMenuOpen] = useState(false);
+	const moreMenuRef = useRef<HTMLDivElement>(null);
+
+	// Updater state
+	const [updateAvailable, setUpdateAvailable] = useState(false);
+	const [updateVersion, setUpdateVersion] = useState("");
+	const [updateStatus, setUpdateStatus] = useState<"idle" | "checking" | "available" | "downloading" | "installing" | "uptodate" | "error">("idle");
+	const [downloadProgress, setDownloadProgress] = useState(0);
+	const [showUpdateModal, setShowUpdateModal] = useState(false);
+	const [updateMessage, setUpdateMessage] = useState("");
+
+	// Reactive notification count from localStorage and events
+	const [actualNotifCount, setActualNotifCount] = useState<number>(() => {
+		if (notificationCount > 0) return notificationCount;
+		try {
+			const saved = localStorage.getItem("caelestia-notifications");
+			if (saved) {
+				const parsed = JSON.parse(saved);
+				if (Array.isArray(parsed)) {
+					return parsed.reduce((acc, g) => acc + (g.items?.length || 0), 0);
+				}
+			}
+		} catch {}
+		return 0;
+	});
+
+	// Sync notification count
+	useEffect(() => {
+		const updateCount = () => {
+			try {
+				const saved = localStorage.getItem("caelestia-notifications");
+				if (saved) {
+					const parsed = JSON.parse(saved);
+					if (Array.isArray(parsed)) {
+						const count = parsed.reduce((acc, g) => acc + (g.items?.length || 0), 0);
+						setActualNotifCount(count);
+						return;
+					}
+				}
+			} catch {}
+			setActualNotifCount(0);
+		};
+
+		updateCount();
+		window.addEventListener("storage", updateCount);
+		window.addEventListener("caelestia-notifications-updated", updateCount);
+		return () => {
+			window.removeEventListener("storage", updateCount);
+			window.removeEventListener("caelestia-notifications-updated", updateCount);
+		};
+	}, []);
+
+	// If parent passed explicit count > 0, reflect it
+	useEffect(() => {
+		if (notificationCount !== undefined) {
+			setActualNotifCount(notificationCount);
+		}
+	}, [notificationCount]);
 
 	// Clock ticker
 	useEffect(() => {
@@ -88,18 +163,58 @@ export function CaelestiaTopBar({
 			.catch(() => {});
 	}, []);
 
-	// Close tools menu on click outside
+	// Auto-updater: check for updates in background & listen for events
+	useEffect(() => {
+		// Silent check on launch
+		invoke<UpdateCheckResult>("check_for_updates", { force: false })
+			.then((res) => {
+				if (res && res.available) {
+					setUpdateAvailable(true);
+					setUpdateVersion(res.version || "Nueva versión");
+				}
+			})
+			.catch(() => {});
+
+		const unlistenAvail = listen<UpdateCheckResult>("update-available", (event) => {
+			if (event.payload?.available) {
+				setUpdateAvailable(true);
+				setUpdateVersion(event.payload.version || "Nueva versión");
+			}
+		});
+
+		const unlistenStatus = listen<{ status: string; progress?: number }>("auto-update-status", (event) => {
+			if (event.payload.status === "downloading") {
+				setUpdateStatus("downloading");
+				if (typeof event.payload.progress === "number") {
+					setDownloadProgress(event.payload.progress);
+				}
+			} else if (event.payload.status === "installing") {
+				setUpdateStatus("installing");
+				setDownloadProgress(100);
+			}
+		});
+
+		return () => {
+			unlistenAvail.then((f) => f()).catch(() => {});
+			unlistenStatus.then((f) => f()).catch(() => {});
+		};
+	}, []);
+
+	// Close menus on click outside
 	useEffect(() => {
 		const handleClickOutside = (e: MouseEvent) => {
 			if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
 				setMenuOpen(false);
 			}
+			if (moreMenuRef.current && !moreMenuRef.current.contains(e.target as Node)) {
+				setMoreMenuOpen(false);
+			}
 		};
-		if (menuOpen) {
+		if (menuOpen || moreMenuOpen) {
 			window.addEventListener("mousedown", handleClickOutside);
 		}
 		return () => window.removeEventListener("mousedown", handleClickOutside);
-	}, [menuOpen]);
+	}, [menuOpen, moreMenuOpen]);
 
 	// Toggle bluetooth
 	const handleToggleBluetooth = async () => {
@@ -215,6 +330,51 @@ export function CaelestiaTopBar({
 		}
 	};
 
+	// Manual check for updates
+	const handleManualCheckUpdates = async () => {
+		setMoreMenuOpen(false);
+		setUpdateStatus("checking");
+		setShowUpdateModal(true);
+		setUpdateMessage("Buscando nuevas versiones en GitHub...");
+		try {
+			const res = await invoke<UpdateCheckResult>("check_for_updates", { force: true });
+			if (res && res.available) {
+				setUpdateAvailable(true);
+				setUpdateVersion(res.version || "Nueva versión");
+				setUpdateStatus("available");
+				setUpdateMessage(`Hay una nueva versión disponible: ${res.version || ""}`);
+			} else {
+				setUpdateStatus("uptodate");
+				setUpdateMessage("Celestial Bloom está actualizado a la última versión disponible.");
+			}
+		} catch (err: any) {
+			setUpdateStatus("error");
+			setUpdateMessage(`Error al comprobar actualizaciones: ${err?.message || err}`);
+		}
+	};
+
+	// Trigger install update
+	const handleInstallUpdate = async () => {
+		setUpdateStatus("downloading");
+		setDownloadProgress(0);
+		try {
+			await invoke("install_update");
+		} catch (e: any) {
+			setUpdateStatus("error");
+			setUpdateMessage(`Error en la instalación: ${e?.message || e}`);
+		}
+	};
+
+	// Restart application
+	const handleRestartApp = async () => {
+		setMoreMenuOpen(false);
+		try {
+			await invoke("restart_bloom");
+		} catch (e) {
+			console.error("Restart failed:", e);
+		}
+	};
+
 	const toolsList = [
 		{ key: "clipboard", label: "Portapapeles", icon: <Clipboard size={14} /> },
 		{ key: "notes", label: "Notas", icon: <Edit3 size={14} /> },
@@ -247,7 +407,7 @@ export function CaelestiaTopBar({
 				{/* 2. Música */}
 				{activeTab === "music" ? (
 					<button type="button" className="chome-tab-item active" onClick={() => onSwitchTab("music")}>
-						<Play size={13} fill="currentColor" strokeWidth={0} />
+						<span style={{ fontSize: 13, lineHeight: 1 }}>▶</span>
 						<span>Música</span>
 					</button>
 				) : (
@@ -257,7 +417,7 @@ export function CaelestiaTopBar({
 						title="Música"
 						onClick={() => onSwitchTab("music")}
 					>
-						<Play size={13} fill="currentColor" strokeWidth={0} />
+						<span style={{ fontSize: 13, lineHeight: 1 }}>▶</span>
 					</button>
 				)}
 
@@ -271,7 +431,7 @@ export function CaelestiaTopBar({
 					<button
 						type="button"
 						className="chome-tab-item icon-only"
-						title="Rendimiento"
+						title="Rendimiento del Sistema"
 						onClick={() => onSwitchTab("perf")}
 					>
 						<Clock size={14} strokeWidth={2.2} />
@@ -288,19 +448,19 @@ export function CaelestiaTopBar({
 					<button
 						type="button"
 						className="chome-tab-item icon-only"
-						title="Mezclador"
+						title="Mezclador de Volumen"
 						onClick={() => onSwitchTab("mixer")}
 					>
 						<Sliders size={14} strokeWidth={2.2} />
 					</button>
 				)}
 
-				{/* 5. Notificaciones */}
+				{/* 5. Notificaciones (solo muestra badge si hay notificaciones reales > 0) */}
 				{activeTab === "notifications" ? (
 					<button type="button" className="chome-tab-item active" onClick={() => onSwitchTab("notifications")}>
 						<Bell size={14} strokeWidth={2.4} />
 						<span>Notificaciones</span>
-						{notificationCount > 0 && <span className="chome-badge">{notificationCount}</span>}
+						{actualNotifCount > 0 && <span className="chome-badge">{actualNotifCount}</span>}
 					</button>
 				) : (
 					<button
@@ -310,14 +470,14 @@ export function CaelestiaTopBar({
 						onClick={() => onSwitchTab("notifications")}
 					>
 						<Bell size={14} strokeWidth={2.2} />
-						{notificationCount > 0 && <span className="chome-badge">{notificationCount}</span>}
+						{actualNotifCount > 0 && <span className="chome-badge">{actualNotifCount}</span>}
 					</button>
 				)}
 
 				{/* Divider */}
 				<div className="chome-tab-divider" />
 
-				{/* 6. Notas / Utilidades (con dropdown) */}
+				{/* 6. Herramientas (con dropdown) */}
 				<div className="chome-tool-dropdown-wrap" ref={menuRef}>
 					{activeTab === "notes" ? (
 						<button
@@ -333,16 +493,16 @@ export function CaelestiaTopBar({
 						<button
 							type="button"
 							className="chome-tab-item icon-only"
-							title="Notas / Herramientas"
+							title="Herramientas y Utilidades"
 							onClick={() => {
 								onSwitchTab("notes");
+								setMenuOpen(true);
 							}}
 						>
 							<FileText size={14} strokeWidth={2.2} />
 						</button>
 					)}
 
-					{/* Dropdown Menu (Image 8) */}
 					{menuOpen && (
 						<div className="ctool-menu-popup">
 							{toolsList.map((tool) => (
@@ -366,15 +526,49 @@ export function CaelestiaTopBar({
 					)}
 				</div>
 
-				{/* 7. Más opciones */}
-				<button
-					type="button"
-					className="chome-tab-item icon-only"
-					title="Más utilidades"
-					onClick={() => setMenuOpen(!menuOpen)}
-				>
-					<MoreHorizontal size={14} strokeWidth={2.2} />
-				</button>
+				{/* 7. Más opciones (...) */}
+				<div className="chome-more-dropdown-wrap" ref={moreMenuRef} style={{ position: "relative" }}>
+					<button
+						type="button"
+						className={`chome-tab-item icon-only ${moreMenuOpen ? "active" : ""}`}
+						title="Más opciones"
+						onClick={() => setMoreMenuOpen(!moreMenuOpen)}
+					>
+						<MoreHorizontal size={14} strokeWidth={2.2} />
+					</button>
+
+					{moreMenuOpen && (
+						<div className="ctool-menu-popup" style={{ minWidth: 200, right: 0, left: "auto" }}>
+							<button
+								type="button"
+								className="ctool-menu-item"
+								onClick={handleManualCheckUpdates}
+							>
+								<RefreshCw size={14} className="ctool-item-icon" />
+								<span className="ctool-item-text">Buscar actualizaciones</span>
+							</button>
+							<button
+								type="button"
+								className="ctool-menu-item"
+								onClick={handleRestartApp}
+							>
+								<RotateCw size={14} className="ctool-item-icon" />
+								<span className="ctool-item-text">Reiniciar Celestial Bloom</span>
+							</button>
+							<button
+								type="button"
+								className="ctool-menu-item"
+								onClick={() => {
+									setMoreMenuOpen(false);
+									handleOpenSettings();
+								}}
+							>
+								<Sliders size={14} className="ctool-item-icon" />
+								<span className="ctool-item-text">Configuración</span>
+							</button>
+						</div>
+					)}
+				</div>
 			</div>
 
 			{/* ── Center Digital Clock ── */}
@@ -382,8 +576,24 @@ export function CaelestiaTopBar({
 				<span>{timeStr}</span>
 			</div>
 
-			{/* ── Right Quick Toggles (Image 9) ── */}
+			{/* ── Right Quick Toggles & Updater ── */}
 			<div className="chome-quick-toggles">
+				{/* Update Pill indicator (visible when update is available) */}
+				{updateAvailable && (
+					<button
+						type="button"
+						className="chome-update-pill-btn"
+						title={`Nueva versión disponible: ${updateVersion}. Clic para actualizar.`}
+						onClick={() => {
+							setShowUpdateModal(true);
+							setUpdateStatus("available");
+						}}
+					>
+						<ArrowUpCircle size={13} strokeWidth={2.5} />
+						<span>Actualizar</span>
+					</button>
+				)}
+
 				{/* Volume Toggle & Mixer Shortcut */}
 				<button
 					type="button"
@@ -461,6 +671,111 @@ export function CaelestiaTopBar({
 					<Sliders size={14} strokeWidth={2.2} />
 				</button>
 			</div>
+
+			{/* ── Auto-Update Modal Dialog ── */}
+			{showUpdateModal && (
+				<div className="chome-update-modal-backdrop" onClick={() => setShowUpdateModal(false)}>
+					<div className="chome-update-modal-card" onClick={(e) => e.stopPropagation()}>
+						<div className="chome-update-modal-header">
+							<div className="chome-update-modal-title">
+								<ArrowUpCircle size={18} color="#0a84ff" />
+								<span>Actualizador de Celestial Bloom</span>
+							</div>
+							<button
+								type="button"
+								className="chome-update-modal-close"
+								onClick={() => setShowUpdateModal(false)}
+							>
+								<X size={14} />
+							</button>
+						</div>
+
+						<div className="chome-update-modal-body">
+							{updateStatus === "checking" && (
+								<div className="chome-update-status-row">
+									<RefreshCw size={20} className="chome-spin-icon" color="#0a84ff" />
+									<div>
+										<div style={{ fontWeight: 600, color: "#fff" }}>Comprobando actualizaciones...</div>
+										<div style={{ fontSize: 12, color: "rgba(255, 255, 255, 0.5)" }}>Consultando GitHub Releases</div>
+									</div>
+								</div>
+							)}
+
+							{updateStatus === "uptodate" && (
+								<div className="chome-update-status-row">
+									<CheckCircle2 size={24} color="#30d158" />
+									<div>
+										<div style={{ fontWeight: 600, color: "#fff" }}>Estás al día</div>
+										<div style={{ fontSize: 12, color: "rgba(255, 255, 255, 0.5)" }}>
+											Tienes instalada la última versión disponible de Celestial Bloom.
+										</div>
+									</div>
+								</div>
+							)}
+
+							{updateStatus === "available" && (
+								<div>
+									<div style={{ fontSize: 14, fontWeight: 600, color: "#fff", marginBottom: 4 }}>
+										¡Nueva versión lista para instalar!
+									</div>
+									<div style={{ fontSize: 12.5, color: "#0a84ff", marginBottom: 12, fontWeight: 500 }}>
+										{updateVersion || "Nueva actualización"}
+									</div>
+									<div style={{ fontSize: 12, color: "rgba(255, 255, 255, 0.7)", lineHeight: 1.5, marginBottom: 16 }}>
+										La aplicación se descargará e instalará directamente en tu laptop de forma automática y se reiniciará sin necesidad de descargas manuales.
+									</div>
+									<button
+										type="button"
+										className="chome-update-btn-action"
+										onClick={handleInstallUpdate}
+									>
+										Descargar e Instalar Ahora
+									</button>
+								</div>
+							)}
+
+							{updateStatus === "downloading" && (
+								<div>
+									<div style={{ fontSize: 13, fontWeight: 600, color: "#fff", marginBottom: 8 }}>
+										Descargando actualización... {downloadProgress}%
+									</div>
+									<div className="chome-update-progress-track">
+										<div
+											className="chome-update-progress-fill"
+											style={{ width: `${downloadProgress}%` }}
+										/>
+									</div>
+									<div style={{ fontSize: 11, color: "rgba(255, 255, 255, 0.4)", marginTop: 8 }}>
+										Por favor espera. Al terminar, la aplicación se reiniciará automáticamente.
+									</div>
+								</div>
+							)}
+
+							{updateStatus === "installing" && (
+								<div className="chome-update-status-row">
+									<RefreshCw size={20} className="chome-spin-icon" color="#30d158" />
+									<div>
+										<div style={{ fontWeight: 600, color: "#fff" }}>Instalando actualización...</div>
+										<div style={{ fontSize: 12, color: "rgba(255, 255, 255, 0.5)" }}>
+											Reiniciando Celestial Bloom en la nueva versión...
+										</div>
+									</div>
+								</div>
+							)}
+
+							{updateStatus === "error" && (
+								<div className="chome-update-status-row">
+									<AlertCircle size={22} color="#ff453a" />
+									<div>
+										<div style={{ fontWeight: 600, color: "#ff453a" }}>Error en la actualización</div>
+										<div style={{ fontSize: 12, color: "rgba(255, 255, 255, 0.6)" }}>{updateMessage}</div>
+									</div>
+								</div>
+							)}
+						</div>
+					</div>
+				</div>
+			)}
 		</div>
 	);
 }

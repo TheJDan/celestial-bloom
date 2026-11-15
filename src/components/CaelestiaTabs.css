@@ -2099,6 +2099,161 @@
 	color: #ffffff;
 }
 
+.cmixer-empty-apps {
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	justify-content: center;
+	padding: 32px 16px;
+	color: rgba(255, 255, 255, 0.4);
+	font-size: 12px;
+	text-align: center;
+	gap: 8px;
+}
+
+/* ══════════════════════════════════════════════════════════════
+   UPDATE PILL & MODAL
+   ══════════════════════════════════════════════════════════════ */
+.chome-update-pill-btn {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	height: 28px;
+	padding: 0 10px;
+	border-radius: 999px;
+	background: linear-gradient(135deg, rgba(10, 132, 255, 0.25), rgba(0, 113, 227, 0.4));
+	border: 1px solid rgba(10, 132, 255, 0.5);
+	color: #64d2ff;
+	font-size: 11.5px;
+	font-weight: 600;
+	cursor: pointer;
+	box-shadow: 0 0 12px rgba(10, 132, 255, 0.25);
+	transition: all 0.15s ease;
+	animation: pulse-update-pill 2s infinite ease-in-out;
+}
+
+.chome-update-pill-btn:hover {
+	background: linear-gradient(135deg, rgba(10, 132, 255, 0.4), rgba(0, 113, 227, 0.6));
+	color: #ffffff;
+	transform: scale(1.02);
+}
+
+@keyframes pulse-update-pill {
+	0%, 100% {
+		box-shadow: 0 0 8px rgba(10, 132, 255, 0.2);
+	}
+	50% {
+		box-shadow: 0 0 16px rgba(10, 132, 255, 0.5);
+	}
+}
+
+.chome-update-modal-backdrop {
+	position: fixed;
+	top: 0;
+	left: 0;
+	right: 0;
+	bottom: 0;
+	background: rgba(0, 0, 0, 0.65);
+	backdrop-filter: blur(8px);
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	z-index: 99999;
+}
+
+.chome-update-modal-card {
+	width: 380px;
+	background: rgba(24, 24, 28, 0.98);
+	border: 1px solid rgba(255, 255, 255, 0.12);
+	border-radius: 14px;
+	padding: 18px 20px;
+	box-shadow: 0 20px 40px rgba(0, 0, 0, 0.7);
+}
+
+.chome-update-modal-header {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	margin-bottom: 14px;
+	border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+	padding-bottom: 10px;
+}
+
+.chome-update-modal-title {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	font-size: 13.5px;
+	font-weight: 600;
+	color: #ffffff;
+}
+
+.chome-update-modal-close {
+	background: transparent;
+	border: none;
+	color: rgba(255, 255, 255, 0.5);
+	cursor: pointer;
+	padding: 4px;
+	border-radius: 6px;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+}
+
+.chome-update-modal-close:hover {
+	background: rgba(255, 255, 255, 0.1);
+	color: #ffffff;
+}
+
+.chome-update-status-row {
+	display: flex;
+	align-items: center;
+	gap: 12px;
+	padding: 8px 0;
+}
+
+.chome-spin-icon {
+	animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+	from { transform: rotate(0deg); }
+	to { transform: rotate(360deg); }
+}
+
+.chome-update-btn-action {
+	width: 100%;
+	padding: 9px 16px;
+	border-radius: 8px;
+	background: #0a84ff;
+	border: none;
+	color: #ffffff;
+	font-size: 12.5px;
+	font-weight: 600;
+	cursor: pointer;
+	transition: background 0.15s ease;
+}
+
+.chome-update-btn-action:hover {
+	background: #0071e3;
+}
+
+.chome-update-progress-track {
+	width: 100%;
+	height: 8px;
+	border-radius: 4px;
+	background: rgba(255, 255, 255, 0.1);
+	overflow: hidden;
+	margin-top: 6px;
+}
+
+.chome-update-progress-fill {
+	height: 100%;
+	background: linear-gradient(90deg, #0a84ff, #30d158);
+	border-radius: 4px;
+	transition: width 0.2s ease;
+}
+
 /* ══════════════════════════════════════════════════════════════
    CAELESTIA NOTIFICATIONS TAB (Image 7)
    ══════════════════════════════════════════════════════════════ */
